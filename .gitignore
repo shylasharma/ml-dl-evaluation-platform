@@ -30,4 +30,3 @@ backend/*.log
 
 # Python extras (only if used)
 backend/**/*.egg-info/
-backend/.pytest_cache/
