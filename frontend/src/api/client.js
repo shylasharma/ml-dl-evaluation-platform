@@ -45,7 +45,8 @@ export const api = {
   deleteExperiment: (id) => client.delete(`/experiments/${id}`).then((r) => r.data),
   rerunExperiment: (id) => client.post(`/experiments/${id}/rerun`).then((r) => r.data),
 
-  // Reports
+   // Reports
   exportUrl: (id, format) => `${import.meta.env.VITE_API_BASE_URL || "/api"}/experiments/${id}/export?format=${format}`,
+};
 
 export default api;
