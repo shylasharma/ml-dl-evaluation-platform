@@ -1,6 +1,8 @@
 import axios from "axios";
 
-const client = axios.create({ baseURL: "/api" });
+const client = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || "/api",
+});
 
 // Normalize backend errors into a plain, user-facing message string.
 client.interceptors.response.use(
@@ -44,7 +46,6 @@ export const api = {
   rerunExperiment: (id) => client.post(`/experiments/${id}/rerun`).then((r) => r.data),
 
   // Reports
-  exportUrl: (id, format) => `/api/experiments/${id}/export?format=${format}`,
-};
+  exportUrl: (id, format) => `${import.meta.env.VITE_API_BASE_URL || "/api"}/experiments/${id}/export?format=${format}`,
 
 export default api;
