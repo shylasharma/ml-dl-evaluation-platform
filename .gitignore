@@ -19,3 +19,15 @@ frontend/.vite/
 *.swp
 .vscode/
 .idea/
+# Environment variables
+.env
+.env.local
+backend/.env
+frontend/.env
+# Logs
+*.log
+backend/*.log
+
+# Python extras (only if used)
+backend/**/*.egg-info/
+backend/.pytest_cache/
