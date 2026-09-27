@@ -1,0 +1,21 @@
+# Backend
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/storage/app.db
+backend/storage/datasets/*
+!backend/storage/datasets/.gitkeep
+backend/storage/exports/*
+!backend/storage/exports/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS/editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
