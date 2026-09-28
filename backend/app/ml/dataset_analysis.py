@@ -26,12 +26,38 @@ def json_safe_records(frame: pd.DataFrame) -> List[Dict[str, Any]]:
 
 def load_clean_csv(path: str) -> pd.DataFrame:
     """
-    Read a CSV and drop fully-empty columns/rows. Excel-style exports often end every
-    row with a trailing comma, which pandas turns into an all-empty 'Unnamed: N' column
-    that would otherwise be mistaken for the target.
+    Read CSV files robustly.
+
+    Supports common delimiters such as comma, semicolon and tab,
+    handles UTF-8 BOM files, quoted values, and removes completely
+    empty rows/columns.
     """
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(
+            path,
+            sep=None,
+            engine="python",
+            encoding="utf-8-sig",
+        )
+    except UnicodeDecodeError:
+        df = pd.read_csv(
+            path,
+            sep=None,
+            engine="python",
+            encoding="latin-1",
+        )
+
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+
+    if df.empty:
+        raise ValueError("The CSV file is empty.")
+
+    if df.shape[1] < 2:
+        raise ValueError(
+            "The CSV could not be parsed into multiple columns. "
+            "Please check the delimiter and file format."
+        )
+
     return df.reset_index(drop=True)
 
 
