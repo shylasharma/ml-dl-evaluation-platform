@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,9 @@ from app.db_models import Dataset, Experiment
 from app.schemas import ExperimentConfig
 from app.ml.orchestrator import run_experiment
 from app.utils.errors import friendly_message, FriendlyError
+from app.utils.json_safe import sanitize_for_json
+
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/api/experiments", tags=["experiments"])
 
@@ -49,11 +53,13 @@ def run_new_experiment(cfg: ExperimentConfig, db: Session = Depends(get_db)):
         db.commit()
         raise HTTPException(exc.status_code, exc.message)
     except Exception as exc:
+        logger.exception("Experiment %s failed", experiment.id)
         experiment.status = "failed"
         experiment.error_message = friendly_message(exc)
         db.commit()
         raise HTTPException(400, experiment.error_message)
 
+    outcome = sanitize_for_json(outcome)
     experiment.results_json = outcome
     experiment.insights_json = outcome["insights"]
     experiment.conclusion_text = outcome["conclusion"]

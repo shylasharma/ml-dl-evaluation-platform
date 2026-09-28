@@ -23,5 +23,7 @@ def friendly_message(exc: Exception) -> str:
         return f"The request could not be processed: {text}"
     if isinstance(exc, MemoryError):
         return "The operation ran out of memory. Try a smaller dataset, fewer models, or disable resampling."
-    # Fallback: never leak raw tracebacks
-    return "An unexpected error occurred while processing this request. Please check your configuration and try again."
+    # Fallback: never leak raw tracebacks, but do name the error type so it can be diagnosed
+    detail = " ".join(text.split())[:200]
+    return (f"An unexpected error occurred ({type(exc).__name__}: {detail}). "
+            f"Please check your configuration and try again.")
