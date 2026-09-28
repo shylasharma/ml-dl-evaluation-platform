@@ -27,4 +27,9 @@ DL_MAX_EPOCHS_ADVANCED = 200
 CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-] + [origin.strip() for origin in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",") if origin.strip()]
+    "https://ml-dl-evaluation-platform.vercel.app",
+] + [
+    origin.strip()
+    for origin in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
