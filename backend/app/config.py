@@ -24,6 +24,10 @@ DL_DEFAULT_EPOCHS = 30
 DL_DEFAULT_BATCH_SIZE = 32
 DL_MAX_EPOCHS_ADVANCED = 200
 
+# Max CSV upload size. Render's free tier has only 512 MB RAM, so keep it small there
+# (Render sets the RENDER env var automatically). Override with MAX_UPLOAD_MB.
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10" if os.environ.get("RENDER") else "500"))
+
 CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",

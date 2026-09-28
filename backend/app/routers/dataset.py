@@ -6,7 +6,7 @@ import pandas as pd
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import DATASETS_DIR
+from app.config import DATASETS_DIR, MAX_UPLOAD_MB
 from app.database import get_db
 from app.db_models import Dataset
 from app.ml.dataset_analysis import profile_dataset
@@ -42,8 +42,26 @@ async def upload_dataset(
 
     saved_name = f"{uuid.uuid4().hex}{ext}"
     saved_path = os.path.join(DATASETS_DIR, saved_name)
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    written = 0
+    too_big = False
     with open(saved_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                too_big = True
+                break
+            f.write(chunk)
+    if too_big:
+        os.remove(saved_path)
+        raise HTTPException(
+            413,
+            f"This file is too large for the server (limit {MAX_UPLOAD_MB} MB). "
+            f"Please upload a smaller CSV or use the sample dataset.",
+        )
 
     try:
         df = _read_csv_safely(saved_path)

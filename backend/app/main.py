@@ -29,7 +29,17 @@ def on_startup():
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(status_code=500, content={"detail": friendly_message(exc)})
+    # This handler runs OUTSIDE CORSMiddleware, so without these headers the browser
+    # reports every server error as a misleading "blocked by CORS policy" message.
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin and origin in CORS_ORIGINS:
+        headers = {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return JSONResponse(status_code=500, content={"detail": friendly_message(exc)}, headers=headers)
 
 
 @app.get("/api/health")
