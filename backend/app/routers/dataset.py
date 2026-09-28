@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import DATASETS_DIR, MAX_UPLOAD_MB
 from app.database import get_db
 from app.db_models import Dataset
-from app.ml.dataset_analysis import profile_dataset
+from app.ml.dataset_analysis import profile_dataset, json_safe_records
 from app.utils.errors import friendly_message, FriendlyError
 
 router = APIRouter(prefix="/api/dataset", tags=["dataset"])
@@ -143,5 +143,5 @@ def preview_dataset(dataset_id: int, rows: int = 25, db: Session = Depends(get_d
         df = pd.read_csv(dataset.file_path)
     except Exception as exc:
         raise HTTPException(400, friendly_message(exc))
-    preview = df.head(rows).where(pd.notnull(df.head(rows)), None).to_dict(orient="records")
+    preview = json_safe_records(df.head(rows))
     return {"columns": list(df.columns), "rows": preview}
