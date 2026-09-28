@@ -9,6 +9,7 @@ from app.database import get_db
 from app.db_models import Dataset, Experiment
 from app.schemas import ExperimentConfig
 from app.ml.orchestrator import run_experiment
+from app.ml.dataset_analysis import load_clean_csv
 from app.utils.errors import friendly_message, FriendlyError
 from app.utils.json_safe import sanitize_for_json
 
@@ -35,7 +36,7 @@ def run_new_experiment(cfg: ExperimentConfig, db: Session = Depends(get_db)):
     db.refresh(experiment)
 
     try:
-        df = pd.read_csv(dataset.file_path)
+        df = load_clean_csv(dataset.file_path)
     except Exception as exc:
         experiment.status = "failed"
         experiment.error_message = friendly_message(exc)

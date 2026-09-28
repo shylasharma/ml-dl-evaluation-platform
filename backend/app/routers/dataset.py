@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import DATASETS_DIR, MAX_UPLOAD_MB
 from app.database import get_db
 from app.db_models import Dataset
-from app.ml.dataset_analysis import profile_dataset, json_safe_records
+from app.ml.dataset_analysis import profile_dataset, json_safe_records, load_clean_csv
 from app.utils.errors import friendly_message, FriendlyError
 
 router = APIRouter(prefix="/api/dataset", tags=["dataset"])
@@ -19,7 +19,7 @@ ALLOWED_EXTENSIONS = {".csv"}
 
 def _read_csv_safely(path: str) -> pd.DataFrame:
     try:
-        df = pd.read_csv(path)
+        df = load_clean_csv(path)
     except Exception as exc:
         raise FriendlyError(f"This file could not be read as a CSV. Details: {exc}")
 
@@ -28,6 +28,14 @@ def _read_csv_safely(path: str) -> pd.DataFrame:
     if df.shape[1] < 2:
         raise FriendlyError("The dataset needs at least one feature column plus a target column.")
     return df
+
+
+def _check_target(profile: dict) -> None:
+    if profile["n_classes"] < 2:
+        raise FriendlyError(
+            f"Could not find a usable target/label column: '{profile['target_column']}' has fewer than "
+            f"2 distinct values. Make sure your CSV has a filled-in label column (e.g. 'target' or 'label')."
+        )
 
 
 @router.post("/upload")
@@ -66,6 +74,7 @@ async def upload_dataset(
     try:
         df = _read_csv_safely(saved_path)
         profile = profile_dataset(df, target_hint=target_column)
+        _check_target(profile)
     except FriendlyError as exc:
         os.remove(saved_path)
         raise HTTPException(exc.status_code, exc.message)
@@ -113,6 +122,7 @@ def load_sample_dataset(filename: str, target_column: str = None, db: Session = 
     try:
         df = _read_csv_safely(saved_path)
         profile = profile_dataset(df, target_hint=target_column)
+        _check_target(profile)
     except FriendlyError as exc:
         os.remove(saved_path)
         raise HTTPException(exc.status_code, exc.message)
@@ -140,7 +150,7 @@ def preview_dataset(dataset_id: int, rows: int = 25, db: Session = Depends(get_d
     if not dataset:
         raise HTTPException(404, "Dataset not found.")
     try:
-        df = pd.read_csv(dataset.file_path)
+        df = load_clean_csv(dataset.file_path)
     except Exception as exc:
         raise HTTPException(400, friendly_message(exc))
     preview = json_safe_records(df.head(rows))

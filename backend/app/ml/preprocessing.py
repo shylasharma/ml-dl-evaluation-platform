@@ -15,6 +15,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 
+from app.utils.errors import FriendlyError
+
 
 def build_feature_pipeline(numeric_features: List[str], categorical_features: List[str],
                             scale_features: bool = True) -> ColumnTransformer:
@@ -52,13 +54,24 @@ def prepare_data(
     and the number of classes.
     """
     df = df.dropna(subset=[target_column]).reset_index(drop=True)
+    if df.empty:
+        raise FriendlyError(
+            f"The target column '{target_column}' has no values, so there is nothing to predict. "
+            f"Check that your CSV's label/target column is filled in (a trailing comma at the end of "
+            f"each row can create an empty extra column)."
+        )
 
     X = df[numeric_features + categorical_features]
     y_raw = df[target_column]
 
     label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(y_raw.astype(str))
+    y = np.asarray(label_encoder.fit_transform(y_raw.astype(str))).astype(np.int64)
     n_classes = len(label_encoder.classes_)
+    if n_classes < 2:
+        raise FriendlyError(
+            f"The target column '{target_column}' contains only one distinct value, so it can't be "
+            f"classified. Please use a dataset whose target has at least two classes."
+        )
 
     stratify = y if min(np.bincount(y)) >= 2 else None
 

@@ -17,6 +17,7 @@ from app.ml.train_dl import train_and_evaluate_dl
 from app.ml.registry import ML_MODELS, DL_MODELS, IMBALANCE_METHODS
 from app.ml.insights import generate_insights, generate_conclusion, generate_significance_insights
 from app.ml.cross_validation import cross_validate_experiment
+from app.utils.errors import FriendlyError
 from app.ml.statistical_tests import run_significance_tests
 
 
@@ -147,9 +148,13 @@ def _run_cv_experiment(df, config, profile, target_column) -> Dict[str, Any]:
     imbalance_label = IMBALANCE_METHODS[imbalance_key].label
 
     clean_df = df.dropna(subset=[target_column]).reset_index(drop=True)
+    if clean_df.empty:
+        raise FriendlyError(f"The target column '{target_column}' has no values, so there is nothing to predict.")
     label_encoder = LabelEncoder()
     y = label_encoder.fit_transform(clean_df[target_column].astype(str))
     n_classes = len(label_encoder.classes_)
+    if n_classes < 2:
+        raise FriendlyError(f"The target column '{target_column}' contains only one distinct value.")
     X_df = clean_df[numeric_features + categorical_features]
 
     min_class_count = int(pd_value_counts_min(y))
