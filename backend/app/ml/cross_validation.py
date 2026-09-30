@@ -7,11 +7,11 @@ independently for every fold, using only that fold's training rows. This is
 the correct way to avoid leakage under cross-validation: nothing computed on
 a fold's test rows may influence how that fold's training rows are prepared.
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import numpy as np
 from sklearn.model_selection import RepeatedStratifiedKFold
 
-from app.ml.preprocessing import build_feature_pipeline
+from app.ml.preprocessing import build_feature_pipeline, DEFAULT_PREPROCESSING
 from app.ml.imbalance import apply_imbalance_technique, ImbalanceError
 from app.ml.train_ml import train_and_evaluate_ml, ModelTrainingError
 from app.ml.train_dl import train_and_evaluate_dl
@@ -33,7 +33,13 @@ def cross_validate_model(
     scale_features: bool = True,
     dl_epochs: int = 30,
     dl_batch_size: int = 32,
+    preprocessing: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    # `preprocessing`, when given, must already be resolved/validated (see
+    # `resolve_preprocessing_config`). Falls back to the legacy `scale_features`
+    # boolean when omitted, for backward compatibility.
+    resolved_preprocessing = preprocessing or {**DEFAULT_PREPROCESSING, "scaling": "standard" if scale_features else "none"}
+
     if model_key not in ML_MODELS and model_key not in DL_MODELS:
         return {"model_key": model_key, "model_label": model_key, "family": "unknown",
                 "error": f"Unknown model '{model_key}'."}
@@ -54,7 +60,10 @@ def cross_validate_model(
         X_test_raw = X_df.iloc[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
-        pipeline = build_feature_pipeline(numeric_features, categorical_features, scale_features)
+        # Refit the whole preprocessing pipeline inside this fold, using only
+        # this fold's training rows, exactly as before Phase 1 -- only the
+        # *configuration* (which imputer/scaler to use) is now configurable.
+        pipeline = build_feature_pipeline(numeric_features, categorical_features, resolved_preprocessing)
         try:
             X_train = pipeline.fit_transform(X_train_raw)
             X_test = pipeline.transform(X_test_raw)
@@ -163,12 +172,14 @@ def cross_validate_experiment(
     scale_features: bool = True,
     dl_epochs: int = 30,
     dl_batch_size: int = 32,
+    preprocessing: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     return [
         cross_validate_model(
             m, X_df, y, numeric_features, categorical_features, n_classes, imbalance_method,
             n_splits=n_splits, n_repeats=n_repeats, random_state=random_state,
             scale_features=scale_features, dl_epochs=dl_epochs, dl_batch_size=dl_batch_size,
+            preprocessing=preprocessing,
         )
         for m in model_keys
     ]

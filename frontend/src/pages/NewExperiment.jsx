@@ -5,6 +5,7 @@ import api from "../api/client.js";
 import ProgressSteps from "../components/common/ProgressSteps.jsx";
 import ModelSelector from "../components/ModelSelector.jsx";
 import ImbalanceSelector from "../components/ImbalanceSelector.jsx";
+import PreprocessingPanel, { DEFAULT_PREPROCESSING } from "../components/PreprocessingPanel.jsx";
 
 const QUICK_MODEL_PRESET = ["logistic_regression", "random_forest", "xgboost", "svm", "ann"];
 
@@ -16,6 +17,7 @@ export default function NewExperiment() {
   const [selectedModels, setSelectedModels] = useState([]);
   const [imbalanceMethod, setImbalanceMethod] = useState("smote");
   const [compareBeforeAfter, setCompareBeforeAfter] = useState(true);
+  const [preprocessing, setPreprocessing] = useState({ ...DEFAULT_PREPROCESSING });
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [advanced, setAdvanced] = useState({
     test_size: 0.25, cv_folds: 0, cv_repeats: 1, random_state: 42,
@@ -43,6 +45,7 @@ export default function NewExperiment() {
         models: selectedModels,
         imbalance_method: imbalanceMethod,
         compare_before_after: compareBeforeAfter && imbalanceMethod !== "none",
+        preprocessing,
         ...advanced,
       };
       const result = await api.runExperiment(config);
@@ -107,11 +110,16 @@ export default function NewExperiment() {
       </div>
 
       <div className="card p-5">
+        <p className="font-semibold mb-3">3. Preprocessing</p>
+        <PreprocessingPanel value={preprocessing} onChange={setPreprocessing} />
+      </div>
+
+      <div className="card p-5">
         <button
           onClick={() => setShowAdvanced((s) => !s)}
           className="flex items-center justify-between w-full font-semibold"
         >
-          <span>3. Advanced Configuration <span className="text-xs font-normal text-slate-400">(optional)</span></span>
+          <span>4. Advanced Configuration <span className="text-xs font-normal text-slate-400">(optional)</span></span>
           <span className="text-slate-400">{showAdvanced ? "▲" : "▼"}</span>
         </button>
         {showAdvanced && (
@@ -162,13 +170,6 @@ export default function NewExperiment() {
                 <option value="mcc">MCC</option>
                 <option value="balanced_accuracy">Balanced Accuracy</option>
               </select>
-            </Field>
-            <Field label="Feature Scaling">
-              <label className="flex items-center gap-2 text-sm mt-2">
-                <input type="checkbox" checked={advanced.scale_features}
-                       onChange={(e) => setAdvanced({ ...advanced, scale_features: e.target.checked })} />
-                Standardize numeric features
-              </label>
             </Field>
           </div>
         )}
