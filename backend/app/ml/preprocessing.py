@@ -36,7 +36,10 @@ from app.utils.errors import FriendlyError
 # ---------------------------------------------------------------------------
 
 VALID_MISSING_NUMERIC = {"median", "mean"}
-VALID_MISSING_CATEGORICAL = {"most_frequent"}
+VALID_MISSING_CATEGORICAL = {
+    "most_frequent",
+    "constant",
+}
 VALID_SCALING = {"none", "standard", "minmax", "robust"}
 VALID_ENCODING = {"onehot"}
 VALID_DUPLICATES = {"keep", "remove"}
@@ -115,36 +118,117 @@ def drop_duplicate_rows(df: pd.DataFrame, duplicates_option: str) -> Tuple[pd.Da
     return deduped, before - len(deduped)
 
 
-def build_feature_pipeline(numeric_features: List[str], categorical_features: List[str],
-                            preprocessing: Optional[Dict[str, str]] = None) -> ColumnTransformer:
+def build_feature_pipeline(
+    numeric_features: List[str],
+    categorical_features: List[str],
+    preprocessing: Optional[Dict[str, str]] = None,
+) -> ColumnTransformer:
     """
-    Builds the per-column impute+scale (numeric) / impute+encode (categorical)
-    pipeline. `preprocessing` must be an already-resolved, validated config
-    (see `resolve_preprocessing_config`); omitting it reproduces the
-    platform's original defaults (median / most_frequent / StandardScaler /
-    one-hot).
+    Builds the preprocessing pipeline for numeric and categorical features.
+
+    Numeric:
+        - Missing values: median / mean
+        - Scaling: none / standard / minmax / robust
+
+    Categorical:
+        - Missing values: most_frequent / constant
+        - Encoding: one-hot
+
+    The returned ColumnTransformer is intended to be fitted only on
+    training data and then used to transform validation/test data.
     """
+
     cfg = preprocessing or DEFAULT_PREPROCESSING
 
-    numeric_steps = [("imputer", SimpleImputer(strategy=cfg.get("missing_numeric", "median")))]
-    scaler_cls = _SCALERS.get(cfg.get("scaling", "standard"), StandardScaler)
+    # ---------------------------------------------------------
+    # NUMERIC PIPELINE
+    # ---------------------------------------------------------
+    numeric_steps = [
+        (
+            "imputer",
+            SimpleImputer(
+                strategy=cfg.get(
+                    "missing_numeric",
+                    "median"
+                )
+            ),
+        )
+    ]
+
+    scaler_cls = _SCALERS.get(
+        cfg.get("scaling", "standard"),
+        StandardScaler,
+    )
+
     if scaler_cls is not None:
-        numeric_steps.append(("scaler", scaler_cls()))
-    numeric_pipeline = Pipeline(numeric_steps)
+        numeric_steps.append(
+            ("scaler", scaler_cls())
+        )
 
-    categorical_pipeline = Pipeline([
-        ("imputer", SimpleImputer(strategy=cfg.get("missing_categorical", "most_frequent"))),
-        ("onehot", OneHotEncoder(handle_unknown="ignore")),
-    ])
+    numeric_pipeline = Pipeline(
+        numeric_steps
+    )
 
+    # ---------------------------------------------------------
+    # CATEGORICAL PIPELINE
+    # ---------------------------------------------------------
+    categorical_strategy = cfg.get(
+        "missing_categorical",
+        "most_frequent",
+    )
+
+    if categorical_strategy == "constant":
+        categorical_imputer = SimpleImputer(
+            strategy="constant",
+            fill_value="Unknown",
+        )
+    else:
+        categorical_imputer = SimpleImputer(
+            strategy="most_frequent",
+        )
+
+    categorical_pipeline = Pipeline(
+        [
+            (
+                "imputer",
+                categorical_imputer,
+            ),
+            (
+                "onehot",
+                OneHotEncoder(
+                    handle_unknown="ignore"
+                ),
+            ),
+        ]
+    )
+
+    # ---------------------------------------------------------
+    # COMBINE TRANSFORMERS
+    # ---------------------------------------------------------
     transformers = []
+
     if numeric_features:
-        transformers.append(("num", numeric_pipeline, numeric_features))
+        transformers.append(
+            (
+                "num",
+                numeric_pipeline,
+                numeric_features,
+            )
+        )
+
     if categorical_features:
-        transformers.append(("cat", categorical_pipeline, categorical_features))
+        transformers.append(
+            (
+                "cat",
+                categorical_pipeline,
+                categorical_features,
+            )
+        )
 
-    return ColumnTransformer(transformers, remainder="drop")
-
+    return ColumnTransformer(
+        transformers,
+        remainder="drop",
+    )
 
 def prepare_data(
     df: pd.DataFrame,
@@ -208,4 +292,25 @@ def prepare_data(
     if hasattr(X_test, "toarray"):
         X_test = X_test.toarray()
 
-    return X_train, X_test, y_train, y_test, pipeline, label_encoder, n_classes, resolved
+   # Get actual feature names after preprocessing.
+    # This is important because OneHotEncoder can expand
+    # categorical columns into multiple features.
+    try:
+        feature_names = list(pipeline.get_feature_names_out())
+    except Exception:
+        feature_names = [
+            f"feature_{i}"
+            for i in range(X_train.shape[1])
+        ]
+
+    return (
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        pipeline,
+        label_encoder,
+        n_classes,
+        resolved,
+        feature_names,
+    )

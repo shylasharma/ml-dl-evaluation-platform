@@ -1,185 +1,803 @@
 """
-Repeated stratified k-fold cross-validation.
+Leakage-safe repeated stratified cross-validation.
 
-Unlike the single train/test split path, this refits the ENTIRE preprocessing
-pipeline (imputation, scaling, encoding) and the imbalance-handling technique
-independently for every fold, using only that fold's training rows. This is
-the correct way to avoid leakage under cross-validation: nothing computed on
-a fold's test rows may influence how that fold's training rows are prepared.
+Per fold:
+
+    Train fold
+        ↓
+    Fit preprocessing
+        ↓
+    Transform train + validation
+        ↓
+    Fit feature selection on TRAIN ONLY
+        ↓
+    Transform train + validation
+        ↓
+    Apply imbalance handling to TRAIN ONLY
+        ↓
+    Train model
+        ↓
+    Evaluate on untouched validation fold
+
+Feature selection is deliberately re-fitted independently for every fold.
 """
-from typing import Dict, Any, List, Optional
+
+from typing import Dict, Any, List
+
 import numpy as np
+import pandas as pd
+
 from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.preprocessing import LabelEncoder
 
-from app.ml.preprocessing import build_feature_pipeline, DEFAULT_PREPROCESSING
-from app.ml.imbalance import apply_imbalance_technique, ImbalanceError
-from app.ml.train_ml import train_and_evaluate_ml, ModelTrainingError
+from app.ml.preprocessing import build_feature_pipeline
+from app.ml.feature_engineering import (
+    resolve_feature_engineering_config,
+    fit_transform_feature_engineering,
+)
+from app.ml.feature_selection import (
+    resolve_feature_selection_config,
+    fit_transform_feature_selection,
+)
+from app.ml.dimensionality_reduction import fit_transform_pca
+
+from app.ml.imbalance import (
+    apply_imbalance_technique,
+    ImbalanceError,
+)
+from app.ml.train_ml import (
+    train_and_evaluate_ml,
+    ModelTrainingError,
+)
 from app.ml.train_dl import train_and_evaluate_dl
-from app.ml.registry import ML_MODELS, DL_MODELS
+from app.ml.registry import (
+    ML_MODELS,
+    DL_MODELS,
+)
 
-CV_METRICS = ["accuracy", "precision", "recall", "specificity", "f1",
-              "roc_auc", "pr_auc", "mcc", "balanced_accuracy", "g_mean"]
+
+# ============================================================================
+# HELPERS
+# ============================================================================
+
+def _to_dense(X):
+    """
+    Convert sparse matrices to dense numpy arrays.
+    """
+
+    if hasattr(X, "toarray"):
+        return X.toarray()
+
+    return np.asarray(X)
 
 
-def cross_validate_model(
+def _aggregate_model_results(
     model_key: str,
-    X_df, y: np.ndarray,
-    numeric_features: List[str], categorical_features: List[str],
-    n_classes: int,
-    imbalance_method: str,
-    n_splits: int = 5,
-    n_repeats: int = 1,
-    random_state: int = 42,
-    scale_features: bool = True,
-    dl_epochs: int = 30,
-    dl_batch_size: int = 32,
-    preprocessing: Optional[Dict[str, str]] = None,
+    model_label: str,
+    family: str,
+    fold_results: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    # `preprocessing`, when given, must already be resolved/validated (see
-    # `resolve_preprocessing_config`). Falls back to the legacy `scale_features`
-    # boolean when omitted, for backward compatibility.
-    resolved_preprocessing = preprocessing or {**DEFAULT_PREPROCESSING, "scaling": "standard" if scale_features else "none"}
+    """
+    Aggregate numeric metrics across CV folds.
 
-    if model_key not in ML_MODELS and model_key not in DL_MODELS:
-        return {"model_key": model_key, "model_label": model_key, "family": "unknown",
-                "error": f"Unknown model '{model_key}'."}
+    The frontend expects the normal model-result structure, while the
+    additional fold-level information is retained for research analysis.
+    """
 
-    spec = ML_MODELS.get(model_key) or DL_MODELS.get(model_key)
-    family = "ML" if model_key in ML_MODELS else "DL"
+    successful = [
+        result
+        for result in fold_results
+        if "error" not in result
+    ]
 
-    rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
+    if not successful:
 
-    fold_scores: Dict[str, List[float]] = {m: [] for m in CV_METRICS}
-    fold_errors: List[str] = []
-    fold_confusion_sum = None
-    fold_importances: List[np.ndarray] = []
-    best_fold_result = None  # the fold whose ROC/PR curve we show as representative
-
-    for fold_idx, (train_idx, test_idx) in enumerate(rskf.split(X_df, y)):
-        X_train_raw = X_df.iloc[train_idx]
-        X_test_raw = X_df.iloc[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-
-        # Refit the whole preprocessing pipeline inside this fold, using only
-        # this fold's training rows, exactly as before Phase 1 -- only the
-        # *configuration* (which imputer/scaler to use) is now configurable.
-        pipeline = build_feature_pipeline(numeric_features, categorical_features, resolved_preprocessing)
-        try:
-            X_train = pipeline.fit_transform(X_train_raw)
-            X_test = pipeline.transform(X_test_raw)
-        except Exception as exc:
-            fold_errors.append(f"Fold {fold_idx + 1}: preprocessing failed ({exc})")
-            continue
-        if hasattr(X_train, "toarray"):
-            X_train = X_train.toarray()
-        if hasattr(X_test, "toarray"):
-            X_test = X_test.toarray()
-
-        try:
-            X_res, y_res, class_weight = apply_imbalance_technique(
-                X_train, y_train, imbalance_method, random_state=random_state
-            )
-        except ImbalanceError as exc:
-            fold_errors.append(f"Fold {fold_idx + 1}: {exc}")
-            continue
-
-        try:
-            if family == "ML":
-                result = train_and_evaluate_ml(
-                    model_key, X_res, y_res, X_test, y_test,
-                    n_classes=n_classes, class_weight=class_weight, random_state=random_state,
-                )
-            else:
-                result = train_and_evaluate_dl(
-                    model_key, X_res, y_res, X_test, y_test,
-                    n_classes=n_classes, class_weight=class_weight,
-                    epochs=dl_epochs, batch_size=dl_batch_size, random_state=random_state,
-                )
-        except ModelTrainingError as exc:
-            fold_errors.append(f"Fold {fold_idx + 1}: {exc}")
-            continue
-
-        for m in CV_METRICS:
-            val = result.get(m)
-            if val is not None:
-                fold_scores[m].append(val)
-
-        cm = np.array(result.get("confusion_matrix") or [])
-        if cm.size:
-            fold_confusion_sum = cm if fold_confusion_sum is None else fold_confusion_sum + cm
-
-        if result.get("feature_importance"):
-            fold_importances.append(np.array(result["feature_importance"]))
-
-        if best_fold_result is None or (result.get("f1") or 0) > (best_fold_result.get("f1") or 0):
-            best_fold_result = result
-
-    n_completed = len(fold_scores["f1"])
-    if n_completed == 0:
-        return {"model_key": model_key, "model_label": spec.label, "family": family,
-                "error": "; ".join(fold_errors) or "All folds failed to train."}
-
-    metrics_summary = {}
-    for m in CV_METRICS:
-        vals = fold_scores[m]
-        metrics_summary[m] = (
-            {"mean": float(np.mean(vals)), "std": float(np.std(vals)), "values": [float(v) for v in vals]}
-            if vals else None
+        first_error = (
+            fold_results[0].get("error")
+            if fold_results
+            else "Model failed in all folds."
         )
 
-    avg_importance = (
-        np.mean(np.vstack(fold_importances), axis=0).tolist() if fold_importances else None
-    )
+        return {
+            "model_key": model_key,
+            "model_label": model_label,
+            "family": family,
+            "error": first_error,
+            "fold_results": fold_results,
+        }
 
-    # Flat, top-level metric fields so this result is drop-in compatible with
-    # the single-split UI (dashboard, compare, model detail) — using the mean
-    # across folds as "the" value, with full distributions kept alongside.
-    flat = {m: (metrics_summary[m]["mean"] if metrics_summary[m] else None) for m in CV_METRICS}
+    # Metrics produced by metrics.py.
+    metric_keys = [
+        "accuracy",
+        "precision",
+        "recall",
+        "specificity",
+        "f1",
+        "roc_auc",
+        "pr_auc",
+        "mcc",
+        "balanced_accuracy",
+        "g_mean",
+    ]
+
+    aggregated = {}
+
+    metric_std = {}
+
+    for metric in metric_keys:
+
+        values = []
+
+        for result in successful:
+
+            value = result.get(metric)
+
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                values.append(float(value))
+
+        if values:
+
+            aggregated[metric] = round(
+                float(np.mean(values)),
+                6,
+            )
+
+            metric_std[metric] = round(
+                float(np.std(values, ddof=1))
+                if len(values) > 1
+                else 0.0,
+                6,
+            )
+
+        else:
+
+            aggregated[metric] = None
+            metric_std[metric] = None
+
+    # Training time is averaged separately.
+    training_times = [
+        float(result["training_time_sec"])
+        for result in successful
+        if isinstance(
+            result.get("training_time_sec"),
+            (int, float),
+        )
+    ]
+
+    if training_times:
+
+        training_time = round(
+            float(np.mean(training_times)),
+            3,
+        )
+
+    else:
+
+        training_time = None
+
+    # Keep the model's feature importance when available.
+    feature_importance = None
+
+    importance_values = [
+        result.get("feature_importance")
+        for result in successful
+        if result.get("feature_importance") is not None
+    ]
+
+    if importance_values:
+
+        try:
+
+            arrays = [
+                np.asarray(value, dtype=float)
+                for value in importance_values
+            ]
+
+            # Only average if dimensions match.
+            if len({
+                array.shape
+                for array in arrays
+            }) == 1:
+
+                feature_importance = (
+                    np.mean(
+                        np.stack(arrays),
+                        axis=0,
+                    )
+                    .tolist()
+                )
+
+        except Exception:
+
+            feature_importance = None
 
     return {
         "model_key": model_key,
-        "model_label": spec.label,
+        "model_label": model_label,
         "family": family,
-        "training_time_sec": best_fold_result.get("training_time_sec") if best_fold_result else None,
-        "feature_importance": avg_importance,
-        "confusion_matrix": fold_confusion_sum.astype(int).tolist() if fold_confusion_sum is not None else None,
-        "roc_curve": best_fold_result.get("roc_curve") if best_fold_result else None,
-        "pr_curve": best_fold_result.get("pr_curve") if best_fold_result else None,
-        **flat,
-        "cv_details": {
-            "n_folds_requested": n_splits * n_repeats,
-            "n_folds_completed": n_completed,
-            "n_splits": n_splits,
-            "n_repeats": n_repeats,
-            "fold_errors": fold_errors,
-            "metrics": metrics_summary,
-            "note": "Confusion matrix is summed across folds. ROC/PR curves and "
-                    "feature importance shown are averaged/representative across folds, "
-                    "not from a single held-out split.",
-        },
+
+        **aggregated,
+
+        "training_time_sec": training_time,
+
+        "feature_importance": feature_importance,
+
+        # Research information.
+        "cv_mean": aggregated,
+        "cv_std": metric_std,
+        "fold_results": fold_results,
+        "n_successful_folds": len(successful),
+        "n_failed_folds": (
+            len(fold_results)
+            - len(successful)
+        ),
     }
 
 
+# ============================================================================
+# MAIN CROSS-VALIDATION FUNCTION
+# ============================================================================
+
 def cross_validate_experiment(
-    X_df, y: np.ndarray,
-    numeric_features: List[str], categorical_features: List[str],
+    X_df: pd.DataFrame,
+    y,
+    numeric_features: List[str],
+    categorical_features: List[str],
     n_classes: int,
-    model_keys: List[str],
-    imbalance_method: str,
+    models_selected: List[str],
+    imbalance_key: str,
     n_splits: int = 5,
     n_repeats: int = 1,
     random_state: int = 42,
-    scale_features: bool = True,
     dl_epochs: int = 30,
     dl_batch_size: int = 32,
-    preprocessing: Optional[Dict[str, str]] = None,
+    preprocessing: Dict[str, Any] | None = None,
+    feature_engineering: Dict[str, Any] | None = None,
+    feature_selection: Dict[str, Any] | None = None,
+    pca: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
-    return [
-        cross_validate_model(
-            m, X_df, y, numeric_features, categorical_features, n_classes, imbalance_method,
-            n_splits=n_splits, n_repeats=n_repeats, random_state=random_state,
-            scale_features=scale_features, dl_epochs=dl_epochs, dl_batch_size=dl_batch_size,
+    """
+    Run repeated stratified cross-validation.
+
+    Parameters
+    ----------
+    X_df:
+        Raw feature dataframe.
+
+    y:
+        Encoded target.
+
+    numeric_features:
+        Original numeric column names.
+
+    categorical_features:
+        Original categorical column names.
+
+    n_classes:
+        Number of target classes.
+
+    models_selected:
+        Models to evaluate.
+
+    imbalance_key:
+        Imbalance-handling method.
+
+    preprocessing:
+        Resolved preprocessing configuration.
+
+    feature_engineering:
+        Resolved feature-engineering configuration.
+
+    feature_selection:
+        Resolved feature-selection configuration.
+    """
+
+    preprocessing = preprocessing or {}
+    feature_engineering = resolve_feature_engineering_config(
+        {"feature_engineering": feature_engineering if feature_engineering else None}
+    )
+    pca = pca or {}
+
+    # Resolve feature-selection configuration safely.
+    feature_selection = resolve_feature_selection_config(
+        {
+            "feature_selection": (
+                feature_selection
+                if feature_selection
+                else None
+            )
+        }
+    )
+
+    # ------------------------------------------------------------------------
+    # CV splitter
+    # ------------------------------------------------------------------------
+
+    cv = RepeatedStratifiedKFold(
+        n_splits=n_splits,
+        n_repeats=n_repeats,
+        random_state=random_state,
+    )
+
+    # ------------------------------------------------------------------------
+    # Store fold-level results for every model.
+    # ------------------------------------------------------------------------
+
+    fold_results_by_model = {
+        model_key: []
+        for model_key in models_selected
+    }
+
+    # ------------------------------------------------------------------------
+    # Track feature-engineering / feature-selection information.
+    # ------------------------------------------------------------------------
+
+    feature_engineering_by_fold = []
+    feature_selection_by_fold = []
+    pca_by_fold = []
+
+    # =========================================================================
+    # FOLD LOOP
+    # =========================================================================
+
+    for fold_number, (
+        train_indices,
+        validation_indices,
+    ) in enumerate(
+        cv.split(X_df, y),
+        start=1,
+    ):
+
+        # ---------------------------------------------------------------------
+        # Raw fold data
+        # ---------------------------------------------------------------------
+
+        X_train_df = X_df.iloc[
+            train_indices
+        ].copy()
+
+        X_validation_df = X_df.iloc[
+            validation_indices
+        ].copy()
+
+        y_train = np.asarray(y)[
+            train_indices
+        ]
+
+        y_validation = np.asarray(y)[
+            validation_indices
+        ]
+
+        # ---------------------------------------------------------------------
+        # PREPROCESSING
+        # ---------------------------------------------------------------------
+        #
+        # Build a NEW preprocessing pipeline for every fold.
+        #
+        # This guarantees that:
+        # - imputers learn only from fold training data
+        # - scalers learn only from fold training data
+        # - encoders learn only from fold training data
+        #
+        # Validation data is only transformed.
+
+        pipeline = build_feature_pipeline(
+            numeric_features=numeric_features,
+            categorical_features=categorical_features,
             preprocessing=preprocessing,
         )
-        for m in model_keys
-    ]
+
+        pipeline.fit(
+            X_train_df
+        )
+
+        X_train = pipeline.transform(
+            X_train_df
+        )
+
+        X_validation = pipeline.transform(
+            X_validation_df
+        )
+
+        X_train = _to_dense(X_train)
+        X_validation = _to_dense(X_validation)
+
+        # ---------------------------------------------------------------------
+        # FEATURE NAMES AFTER PREPROCESSING
+        # ---------------------------------------------------------------------
+
+        try:
+
+            feature_names = list(
+                pipeline.get_feature_names_out()
+            )
+
+        except Exception:
+
+            feature_names = [
+                f"feature_{index}"
+                for index in range(
+                    X_train.shape[1]
+                )
+            ]
+
+        # ---------------------------------------------------------------------
+        # FEATURE ENGINEERING
+        # ---------------------------------------------------------------------
+        #
+        # CRITICAL:
+        #
+        # Feature engineering is fitted independently inside every fold.
+        # The validation fold is transformed only after the training-fold
+        # transformation has been learned. This keeps generated features
+        # leakage-safe during cross-validation.
+
+        feature_engineering_info = {
+            "fold": fold_number,
+            "enabled": bool(
+                feature_engineering.get("enabled", False)
+            ),
+            "original_features": len(feature_names),
+            "engineered_features": len(feature_names),
+            "feature_names": feature_names,
+        }
+
+        if feature_engineering.get("enabled", False):
+
+            (
+                X_train,
+                X_validation,
+                feature_engineering_info,
+            ) = fit_transform_feature_engineering(
+                X_train=X_train,
+                X_test=X_validation,
+                feature_names=feature_names,
+                config=feature_engineering,
+                random_state=random_state + fold_number,
+            )
+
+            feature_engineering_info = {
+                "fold": fold_number,
+                **feature_engineering_info,
+            }
+
+            engineered_names = (
+                feature_engineering_info.get("feature_names")
+                or feature_engineering_info.get("engineered_feature_names")
+            )
+
+            if engineered_names:
+                feature_names = engineered_names
+
+        feature_engineering_by_fold.append(
+            feature_engineering_info
+        )
+
+        # ---------------------------------------------------------------------
+        # FEATURE SELECTION
+        # ---------------------------------------------------------------------
+        #
+        # CRITICAL:
+        #
+        # The selector is fitted ONLY on X_train / y_train.
+        #
+        # It never sees X_validation while learning which features matter.
+        #
+        # This prevents feature-selection leakage.
+
+        fold_feature_selection = {
+            "fold": fold_number,
+            "enabled": bool(
+                feature_selection.get(
+                    "enabled",
+                    False,
+                )
+            ),
+            "method": feature_selection.get(
+                "method",
+                "none",
+            ),
+            "original_features": len(
+                feature_names
+            ),
+        }
+
+        if feature_selection.get(
+            "enabled",
+            False,
+        ):
+
+            (
+                X_train,
+                X_validation,
+                selection_info,
+            ) = fit_transform_feature_selection(
+                X_train=X_train,
+                X_test=X_validation,
+                y_train=y_train,
+                feature_names=feature_names,
+                config=feature_selection,
+                random_state=random_state,
+            )
+
+            fold_feature_selection.update(
+                selection_info
+            )
+
+        else:
+
+            fold_feature_selection.update(
+                {
+                    "selected_features": len(
+                        feature_names
+                    ),
+                    "selected_feature_names": feature_names,
+                }
+            )
+
+        feature_selection_by_fold.append(
+            fold_feature_selection
+        )
+
+        # ---------------------------------------------------------------------
+        # PCA / DIMENSIONALITY REDUCTION
+        # ---------------------------------------------------------------------
+        #
+        # PCA is fitted ONLY on this fold's training data.
+        # The validation fold is transformed with that fitted PCA.
+        # This prevents dimensionality-reduction leakage.
+        #
+
+        selected_feature_names = (
+            fold_feature_selection.get(
+                "selected_feature_names",
+                feature_names,
+            )
+        )
+
+        (
+            X_train,
+            X_validation,
+            pca_info,
+        ) = fit_transform_pca(
+            X_train=X_train,
+            X_test=X_validation,
+            feature_names=selected_feature_names,
+            config=pca,
+            random_state=random_state + fold_number,
+        )
+
+        pca_by_fold.append(
+            {
+                "fold": fold_number,
+                **pca_info,
+            }
+        )
+
+        # =====================================================================
+        # MODEL LOOP
+        # =====================================================================
+
+        for model_key in models_selected:
+
+            # ---------------------------------------------------------------
+            # Identify model
+            # ---------------------------------------------------------------
+
+            if model_key in ML_MODELS:
+
+                model_spec = ML_MODELS[
+                    model_key
+                ]
+
+                family = "ML"
+
+            elif model_key in DL_MODELS:
+
+                model_spec = DL_MODELS[
+                    model_key
+                ]
+
+                family = "DL"
+
+            else:
+
+                fold_results_by_model[
+                    model_key
+                ].append(
+                    {
+                        "error": (
+                            f"Unknown model "
+                            f"'{model_key}'."
+                        )
+                    }
+                )
+
+                continue
+
+            # ---------------------------------------------------------------
+            # IMBALANCE HANDLING
+            # ---------------------------------------------------------------
+            #
+            # Apply imbalance handling ONLY to the training fold.
+            #
+            # Validation data remains untouched.
+
+            try:
+
+                (
+                    X_resampled,
+                    y_resampled,
+                    class_weight,
+                ) = apply_imbalance_technique(
+                    X_train,
+                    y_train,
+                    imbalance_key,
+                    random_state=random_state,
+                )
+
+            except ImbalanceError as exc:
+
+                fold_results_by_model[
+                    model_key
+                ].append(
+                    {
+                        "model_key": model_key,
+                        "model_label": model_spec.label,
+                        "family": family,
+                        "error": str(exc),
+                    }
+                )
+
+                continue
+
+            # ---------------------------------------------------------------
+            # TRAIN + EVALUATE
+            # ---------------------------------------------------------------
+
+            try:
+
+                if family == "ML":
+
+                    result = train_and_evaluate_ml(
+                        model_key,
+                        X_resampled,
+                        y_resampled,
+                        X_validation,
+                        y_validation,
+                        n_classes=n_classes,
+                        class_weight=class_weight,
+                        random_state=(
+                            random_state
+                            + fold_number
+                        ),
+                    )
+
+                else:
+
+                    result = train_and_evaluate_dl(
+                        model_key,
+                        X_resampled,
+                        y_resampled,
+                        X_validation,
+                        y_validation,
+                        n_classes=n_classes,
+                        class_weight=class_weight,
+                        epochs=dl_epochs,
+                        batch_size=dl_batch_size,
+                        random_state=(
+                            random_state
+                            + fold_number
+                        ),
+                    )
+
+                # Add fold metadata.
+                result["fold"] = fold_number
+
+                fold_results_by_model[
+                    model_key
+                ].append(result)
+
+            except ModelTrainingError as exc:
+
+                fold_results_by_model[
+                    model_key
+                ].append(
+                    {
+                        "model_key": model_key,
+                        "model_label": model_spec.label,
+                        "family": family,
+                        "fold": fold_number,
+                        "error": str(exc),
+                    }
+                )
+
+            except Exception as exc:
+
+                fold_results_by_model[
+                    model_key
+                ].append(
+                    {
+                        "model_key": model_key,
+                        "model_label": model_spec.label,
+                        "family": family,
+                        "fold": fold_number,
+                        "error": (
+                            f"Unexpected training "
+                            f"error: {exc}"
+                        ),
+                    }
+                )
+
+    # =========================================================================
+    # AGGREGATE RESULTS
+    # =========================================================================
+
+    final_results = []
+
+    for model_key in models_selected:
+
+        fold_results = fold_results_by_model[
+            model_key
+        ]
+
+        if model_key in ML_MODELS:
+
+            model_label = ML_MODELS[
+                model_key
+            ].label
+
+            family = "ML"
+
+        elif model_key in DL_MODELS:
+
+            model_label = DL_MODELS[
+                model_key
+            ].label
+
+            family = "DL"
+
+        else:
+
+            model_label = model_key
+            family = "unknown"
+
+        aggregated = _aggregate_model_results(
+            model_key=model_key,
+            model_label=model_label,
+            family=family,
+            fold_results=fold_results,
+        )
+
+        final_results.append(
+            aggregated
+        )
+
+    # =========================================================================
+    # GLOBAL CV METADATA
+    # =========================================================================
+
+    for result in final_results:
+
+        result["cv_info"] = {
+            "n_splits": n_splits,
+            "n_repeats": n_repeats,
+            "n_folds": (
+                n_splits
+                * n_repeats
+            ),
+        }
+
+        result[
+            "feature_engineering_by_fold"
+        ] = feature_engineering_by_fold
+
+        result[
+            "feature_selection_by_fold"
+        ] = feature_selection_by_fold
+
+        result[
+            "pca_by_fold"
+        ] = pca_by_fold
+
+    return final_results

@@ -8,9 +8,15 @@ import ImbalanceSelector from "../components/ImbalanceSelector.jsx";
 import PreprocessingPanel, {
   DEFAULT_PREPROCESSING,
 } from "../components/PreprocessingPanel.jsx";
+import FeatureSelectionPanel from "../components/FeatureSelectionPanel.jsx";
+import PCAPanel from "../components/PCAPanel.jsx";
+import HybridizationPanel from "../components/HybridizationPanel.jsx";
+import ModelRecommendationPanel from "../components/ModelRecommendationPanel.jsx";
 
-// Phase 1 quick analysis stays focused on the currently available ML pipeline.
-// Deep-learning presets can be introduced once the DL dependencies/runtime are ready.
+// -----------------------------------------------------------------------------
+// Quick Analysis preset
+// -----------------------------------------------------------------------------
+
 const QUICK_MODEL_PRESET = [
   "logistic_regression",
   "random_forest",
@@ -19,13 +25,20 @@ const QUICK_MODEL_PRESET = [
   "decision_tree",
 ];
 
+// -----------------------------------------------------------------------------
+// Wizard steps
+// -----------------------------------------------------------------------------
+
 const STEPS = [
-  "Dataset",
   "Preprocessing",
   "Models",
   "Balancing",
   "Run",
 ];
+
+// -----------------------------------------------------------------------------
+// Main component
+// -----------------------------------------------------------------------------
 
 export default function NewExperiment() {
   const {
@@ -49,9 +62,62 @@ export default function NewExperiment() {
   const [compareBeforeAfter, setCompareBeforeAfter] =
     useState(true);
 
+  // ---------------------------------------------------------------------------
+  // Preprocessing
+  // ---------------------------------------------------------------------------
+
   const [preprocessing, setPreprocessing] = useState({
     ...DEFAULT_PREPROCESSING,
   });
+
+  // ---------------------------------------------------------------------------
+  // Feature Selection
+  // ---------------------------------------------------------------------------
+
+  const [featureSelection, setFeatureSelection] =
+    useState({
+      enabled: false,
+      method: "none",
+      k: null,
+      threshold: null,
+      correlation_threshold: 0.9,
+      scoring: "f1_weighted",
+      direction: "forward",
+      step: 1,
+      max_features: null,
+    });
+
+  // ---------------------------------------------------------------------------
+  // PCA
+  //
+  // The backend already supports PCA. The current UI version of this file did
+  // not define the state even though it attempted to send `pca: pca`.
+  //
+  // We keep the configuration available and safely disabled by default.
+  // ---------------------------------------------------------------------------
+
+  const [pca, setPca] = useState({
+    enabled: false,
+    mode: "variance",
+    variance: 0.95,
+    n_components: null,
+  });
+
+  // ---------------------------------------------------------------------------
+  // Hybridization
+  // ---------------------------------------------------------------------------
+
+  const [hybridization, setHybridization] =
+    useState({
+      enabled: false,
+      method: "hard_voting",
+      base_models: [],
+      weights: null,
+    });
+
+  // ---------------------------------------------------------------------------
+  // Advanced configuration
+  // ---------------------------------------------------------------------------
 
   const [showAdvanced, setShowAdvanced] =
     useState(false);
@@ -69,6 +135,10 @@ export default function NewExperiment() {
 
   const [running, setRunning] = useState(false);
 
+  // ---------------------------------------------------------------------------
+  // Quick preset
+  // ---------------------------------------------------------------------------
+
   const useQuickPreset = () => {
     setSelectedModels(QUICK_MODEL_PRESET);
     setMode("quick");
@@ -79,11 +149,19 @@ export default function NewExperiment() {
     );
   };
 
+  // ---------------------------------------------------------------------------
+  // Navigation
+  // ---------------------------------------------------------------------------
+
   const goNext = () =>
     setCurrentStep((s) => Math.min(4, s + 1));
 
   const goBack = () =>
     setCurrentStep((s) => Math.max(1, s - 1));
+
+  // ---------------------------------------------------------------------------
+  // Run experiment
+  // ---------------------------------------------------------------------------
 
   const runExperiment = async () => {
     if (!dataset) {
@@ -100,19 +178,88 @@ export default function NewExperiment() {
       );
     }
 
+    // -----------------------------------------------------------------------
+    // PCA validation
+    // -----------------------------------------------------------------------
+
+    if (
+      pca?.enabled &&
+      pca?.mode === "components" &&
+      (
+        !pca.n_components ||
+        pca.n_components < 1 ||
+        (dataset.n_features &&
+          pca.n_components > dataset.n_features)
+      )
+    ) {
+      return notify(
+        `PCA components must be between 1 and ${dataset.n_features || "the available feature count"}.`,
+        "error"
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // Hybridization validation
+    // -----------------------------------------------------------------------
+
+    if (hybridization.enabled) {
+      if (advanced.cv_folds > 0) {
+        return notify(
+          "Hybridization currently requires single train/test split mode. Turn off cross-validation before running a hybrid experiment.",
+          "error"
+        );
+      }
+
+      if (
+        !hybridization.base_models ||
+        hybridization.base_models.length < 2
+      ) {
+        return notify(
+          "Select at least two base models for hybridization.",
+          "error"
+        );
+      }
+
+      const invalidBaseModels =
+        hybridization.base_models.filter(
+          (model) =>
+            !selectedModels.includes(model)
+        );
+
+      if (invalidBaseModels.length > 0) {
+        return notify(
+          "Every hybrid base model must also be selected in the model selection step.",
+          "error"
+        );
+      }
+    }
+
     setRunning(true);
 
     try {
       const config = {
         dataset_id: dataset.dataset_id,
         target_column: dataset.target_column,
+
         mode,
+
         models: selectedModels,
+
         imbalance_method: imbalanceMethod,
+
         compare_before_after:
           compareBeforeAfter &&
           imbalanceMethod !== "none",
+
         preprocessing,
+
+        feature_selection:
+          featureSelection,
+
+        pca,
+
+        hybridization,
+
         ...advanced,
       };
 
@@ -132,11 +279,19 @@ export default function NewExperiment() {
         `/dashboard?experiment=${result.id}`
       );
     } catch (err) {
-      notify(err.message, "error");
+      notify(
+        err.message ||
+          "Experiment failed.",
+        "error"
+      );
     } finally {
       setRunning(false);
     }
   };
+
+  // ---------------------------------------------------------------------------
+  // No dataset
+  // ---------------------------------------------------------------------------
 
   if (!dataset) {
     return (
@@ -164,6 +319,10 @@ export default function NewExperiment() {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Step title
+  // ---------------------------------------------------------------------------
+
   const stepTitle = [
     "Dataset",
     "Prepare your data",
@@ -172,10 +331,17 @@ export default function NewExperiment() {
     "Review experiment & run",
   ][currentStep];
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
   return (
     <div className="max-w-5xl mx-auto space-y-6">
 
-      {/* Progress bar */}
+      {/* ------------------------------------------------------------------ */}
+      {/* Progress bar                                                       */}
+      {/* ------------------------------------------------------------------ */}
+
       <div className="card p-4 overflow-x-auto scroll-thin">
         <ProgressSteps
           steps={STEPS}
@@ -191,7 +357,10 @@ export default function NewExperiment() {
         />
       </div>
 
-      {/* Header */}
+      {/* ------------------------------------------------------------------ */}
+      {/* Header                                                             */}
+      {/* ------------------------------------------------------------------ */}
+
       <div className="flex items-start justify-between gap-4">
 
         <div>
@@ -205,8 +374,9 @@ export default function NewExperiment() {
 
           <p className="text-sm text-slate-500 mt-1">
             Configure one experiment at a time so
-            every preprocessing and balancing choice
-            is explicit and reproducible.
+            every preprocessing, feature-selection,
+            balancing and model choice is explicit
+            and reproducible.
           </p>
         </div>
 
@@ -217,37 +387,58 @@ export default function NewExperiment() {
 
       </div>
 
-      {/* STEP 1 — PREPROCESSING */}
+      {/* ================================================================== */}
+      {/* STEP 1 — PREPROCESSING                                            */}
+      {/* ================================================================== */}
 
       {currentStep === 1 && (
         <PreprocessingStep
           dataset={dataset}
           value={preprocessing}
           onChange={setPreprocessing}
-          onBack={() => navigate("/dataset")}
+          featureSelection={featureSelection}
+          setFeatureSelection={
+            setFeatureSelection
+          }
+          pca={pca}
+          setPca={setPca}
+          onBack={() =>
+            navigate("/dataset")
+          }
           onNext={goNext}
         />
       )}
 
-      {/* STEP 2 — MODELS */}
+      {/* ================================================================== */}
+      {/* STEP 2 — MODELS                                                   */}
+      {/* ================================================================== */}
 
       {currentStep === 2 && (
         <ModelsStep
+          dataset={dataset}
           selectedModels={selectedModels}
-          setSelectedModels={setSelectedModels}
+          setSelectedModels={
+            setSelectedModels
+          }
           onQuickPreset={useQuickPreset}
           onBack={goBack}
           onNext={goNext}
         />
       )}
 
-      {/* STEP 3 — BALANCING */}
+      {/* ================================================================== */}
+      {/* STEP 3 — BALANCING                                                */}
+      {/* ================================================================== */}
 
       {currentStep === 3 && (
         <BalancingStep
           imbalanceMethod={imbalanceMethod}
-          setImbalanceMethod={setImbalanceMethod}
-          compareBeforeAfter={compareBeforeAfter}
+          setImbalanceMethod={
+            setImbalanceMethod
+          }
+          compareBeforeAfter={
+            compareBeforeAfter
+          }
           setCompareBeforeAfter={
             setCompareBeforeAfter
           }
@@ -257,7 +448,9 @@ export default function NewExperiment() {
         />
       )}
 
-      {/* STEP 4 — REVIEW / RUN */}
+      {/* ================================================================== */}
+      {/* STEP 4 — REVIEW / RUN                                             */}
+      {/* ================================================================== */}
 
       {currentStep === 4 && (
         <RunStep
@@ -265,11 +458,21 @@ export default function NewExperiment() {
           preprocessing={preprocessing}
           selectedModels={selectedModels}
           imbalanceMethod={imbalanceMethod}
-          compareBeforeAfter={compareBeforeAfter}
+          hybridization={hybridization}
+          setHybridization={
+            setHybridization
+          }
+          pca={pca}
+          setPca={setPca}
+          compareBeforeAfter={
+            compareBeforeAfter
+          }
           advanced={advanced}
           setAdvanced={setAdvanced}
           showAdvanced={showAdvanced}
-          setShowAdvanced={setShowAdvanced}
+          setShowAdvanced={
+            setShowAdvanced
+          }
           mode={mode}
           setMode={setMode}
           running={running}
@@ -283,14 +486,18 @@ export default function NewExperiment() {
 }
 
 
-/* =====================================================
+/* ============================================================================
    PREPROCESSING STEP
-===================================================== */
+============================================================================ */
 
 function PreprocessingStep({
   dataset,
   value,
   onChange,
+  featureSelection,
+  setFeatureSelection,
+  pca,
+  setPca,
   onBack,
   onNext,
 }) {
@@ -298,6 +505,7 @@ function PreprocessingStep({
     <div className="space-y-5">
 
       {/* Explanation */}
+
       <div className="card p-5 border-primary-100 bg-primary-50/40">
 
         <div className="flex items-start gap-3">
@@ -327,8 +535,8 @@ function PreprocessingStep({
 
       </div>
 
-
       {/* Preprocessing controls */}
+
       <div className="card p-5">
 
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
@@ -365,10 +573,21 @@ function PreprocessingStep({
           onChange={onChange}
         />
 
+        <FeatureSelectionPanel
+          value={featureSelection}
+          onChange={setFeatureSelection}
+        />
+
+        <PCAPanel
+          value={pca}
+          onChange={setPca}
+          featureCount={dataset.n_features}
+        />
+
       </div>
 
-
       {/* Dataset stats */}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
 
         <MiniStat
@@ -391,7 +610,9 @@ function PreprocessingStep({
           label="Classes"
           value={
             dataset.n_classes ??
-            (dataset.is_binary ? 2 : "—")
+            (dataset.is_binary
+              ? 2
+              : "—")
           }
         />
 
@@ -404,7 +625,6 @@ function PreprocessingStep({
 
       </div>
 
-
       <StepNavigation
         onBack={onBack}
         onNext={onNext}
@@ -416,11 +636,12 @@ function PreprocessingStep({
 }
 
 
-/* =====================================================
+/* ============================================================================
    MODEL STEP
-===================================================== */
+============================================================================ */
 
 function ModelsStep({
+  dataset,
   selectedModels,
   setSelectedModels,
   onQuickPreset,
@@ -467,6 +688,11 @@ function ModelsStep({
 
       </div>
 
+      <ModelRecommendationPanel
+        dataset={dataset}
+        selectedModels={selectedModels}
+        onApplyRecommendations={setSelectedModels}
+      />
 
       <div className="flex items-center justify-between text-sm text-slate-500">
 
@@ -479,12 +705,12 @@ function ModelsStep({
 
         {!canContinue && (
           <span className="text-amber-600">
-            Select at least one model to continue.
+            Select at least one model to
+            continue.
           </span>
         )}
 
       </div>
-
 
       <StepNavigation
         onBack={onBack}
@@ -498,9 +724,9 @@ function ModelsStep({
 }
 
 
-/* =====================================================
+/* ============================================================================
    BALANCING STEP
-===================================================== */
+============================================================================ */
 
 function BalancingStep({
   imbalanceMethod,
@@ -535,7 +761,6 @@ function BalancingStep({
           onChange={setImbalanceMethod}
         />
 
-
         {imbalanceMethod !== "none" &&
           cvFolds === 0 && (
 
@@ -564,7 +789,6 @@ function BalancingStep({
             </label>
           )}
 
-
         {imbalanceMethod !== "none" &&
           cvFolds > 0 && (
 
@@ -579,15 +803,15 @@ function BalancingStep({
 
       </div>
 
-
       {/* Pipeline explanation */}
+
       <div className="card p-5">
 
         <p className="font-semibold">
           Current experiment flow
         </p>
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4 text-sm">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mt-4 text-sm">
 
           <FlowItem
             number="01"
@@ -597,18 +821,24 @@ function BalancingStep({
 
           <FlowItem
             number="02"
+            title="Features"
+            text="Select useful features and optionally reduce dimensions with PCA."
+          />
+
+          <FlowItem
+            number="03"
             title="Balance"
             text="Apply the selected training-set strategy."
           />
 
           <FlowItem
-            number="03"
+            number="04"
             title="Train"
-            text="Fit every selected classifier."
+            text="Fit every selected classifier and configured hybrid model."
           />
 
           <FlowItem
-            number="04"
+            number="05"
             title="Evaluate"
             text="Calculate imbalance-aware metrics."
           />
@@ -616,7 +846,6 @@ function BalancingStep({
         </div>
 
       </div>
-
 
       <StepNavigation
         onBack={onBack}
@@ -629,15 +858,19 @@ function BalancingStep({
 }
 
 
-/* =====================================================
+/* ============================================================================
    RUN / REVIEW STEP
-===================================================== */
+============================================================================ */
 
 function RunStep({
   dataset,
   preprocessing,
   selectedModels,
   imbalanceMethod,
+  hybridization,
+  setHybridization,
+  pca,
+  setPca,
   compareBeforeAfter,
   advanced,
   setAdvanced,
@@ -649,10 +882,30 @@ function RunStep({
   onBack,
   onRun,
 }) {
+  const hybridEnabled =
+    Boolean(hybridization?.enabled);
+
+  const hybridBaseModelCount =
+    hybridization?.base_models?.length ?? 0;
+
+  const hybridInvalidForCV =
+    hybridEnabled &&
+    advanced.cv_folds > 0;
+
+  const hybridReady =
+    !hybridEnabled ||
+    (
+      hybridBaseModelCount >= 2 &&
+      !hybridInvalidForCV
+    );
+
   return (
     <div className="space-y-5">
 
-      {/* Summary */}
+      {/* ------------------------------------------------------------------ */}
+      {/* Summary                                                            */}
+      {/* ------------------------------------------------------------------ */}
+
       <div className="card p-5">
 
         <div className="flex items-start justify-between gap-4">
@@ -670,12 +923,19 @@ function RunStep({
 
           </div>
 
-          <span className="chip chip-active">
-            Ready to run
+          <span
+            className={
+              hybridReady
+                ? "chip chip-active"
+                : "chip"
+            }
+          >
+            {hybridReady
+              ? "Ready to run"
+              : "Configuration needs attention"}
           </span>
 
         </div>
-
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-5">
 
@@ -705,12 +965,16 @@ function RunStep({
 
           <SummaryRow
             label="Numeric missing values"
-            value={preprocessing.missing_numeric}
+            value={
+              preprocessing.missing_numeric
+            }
           />
 
           <SummaryRow
             label="Categorical missing values"
-            value={preprocessing.missing_categorical}
+            value={
+              preprocessing.missing_categorical
+            }
           />
 
           <SummaryRow
@@ -738,12 +1002,117 @@ function RunStep({
             }
           />
 
+          <SummaryRow
+            label="Feature Selection"
+            value={
+              featureSelectionLabel()
+            }
+          />
+
+          <SummaryRow
+            label="PCA"
+            value={
+              pca?.enabled
+                ? pca.mode === "components"
+                  ? `Enabled — ${pca.n_components ?? "Custom"} components`
+                  : `Enabled — ${Math.round(
+                      Number(pca.variance ?? 0.95) * 100
+                    )}% variance`
+                : "Disabled"
+            }
+          />
+
+          <SummaryRow
+            label="Hybridization"
+            value={
+              hybridEnabled
+                ? `${hybridization.method} (${hybridBaseModelCount} base models)`
+                : "Disabled"
+            }
+          />
+
         </div>
 
       </div>
 
+      {/* ------------------------------------------------------------------ */}
+      {/* Hybridization                                                      */}
+      {/* ------------------------------------------------------------------ */}
 
-      {/* Advanced configuration */}
+      <HybridizationPanel
+        value={hybridization}
+        onChange={setHybridization}
+        selectedModels={selectedModels}
+        cvFolds={advanced.cv_folds}
+      />
+
+      {/* ------------------------------------------------------------------ */}
+      {/* PCA status                                                         */}
+      {/* ------------------------------------------------------------------ */}
+
+      <div className="card p-5">
+
+        <div className="flex items-start justify-between gap-4">
+
+          <div>
+
+            <p className="font-semibold">
+              PCA / Dimensionality Reduction
+            </p>
+
+            <p className="text-sm text-slate-500 mt-1">
+              PCA is configured in the preprocessing stage and
+              will be applied after preprocessing and feature
+              selection when enabled.
+            </p>
+
+          </div>
+
+          <span className="chip">
+            {pca?.enabled
+              ? "Enabled"
+              : "Disabled"}
+          </span>
+
+        </div>
+
+        {pca?.enabled && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+
+            <SummaryRow
+              label="Mode"
+              value={
+                pca.mode === "components"
+                  ? "Custom components"
+                  : "Target variance"
+              }
+            />
+
+            <SummaryRow
+              label="Variance"
+              value={
+                `${Math.round(
+                  Number(pca.variance) * 100
+                )}%`
+              }
+            />
+
+            <SummaryRow
+              label="Components"
+              value={
+                pca.n_components ?? "Automatic"
+              }
+            />
+
+          </div>
+        )}
+
+      </div>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Advanced configuration                                             */}
+      {/* ------------------------------------------------------------------ */}
+
       <div className="card p-5">
 
         <button
@@ -766,10 +1135,11 @@ function RunStep({
 
         </button>
 
-
         {showAdvanced && (
 
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-5">
+
+            {/* Test size */}
 
             <Field label="Test Size">
 
@@ -780,32 +1150,61 @@ function RunStep({
                 step="0.05"
                 value={advanced.test_size}
                 onChange={(e) => {
+
                   setMode("advanced");
 
                   setAdvanced({
                     ...advanced,
                     test_size:
-                      Number(e.target.value),
+                      Number(
+                        e.target.value
+                      ),
                   });
+
                 }}
                 className="input"
               />
 
             </Field>
 
+            {/* CV folds */}
 
             <Field label="Cross-Validation Folds">
 
               <select
                 value={advanced.cv_folds}
                 onChange={(e) => {
+
                   setMode("advanced");
+
+                  const nextCvFolds =
+                    Number(
+                      e.target.value
+                    );
 
                   setAdvanced({
                     ...advanced,
                     cv_folds:
-                      Number(e.target.value),
+                      nextCvFolds,
                   });
+
+                  // If CV is enabled while a hybrid model is
+                  // configured, reset hybridization because the
+                  // current backend intentionally does not support
+                  // hybrid CV yet.
+                  if (
+                    nextCvFolds > 0 &&
+                    hybridization.enabled
+                  ) {
+                    setHybridization({
+                      ...hybridization,
+                      enabled: false,
+                    });
+
+                    // We deliberately do not show an error here.
+                    // The UI simply disables the hybrid configuration.
+                  }
+
                 }}
                 className="input"
               >
@@ -826,6 +1225,7 @@ function RunStep({
 
             </Field>
 
+            {/* CV repeats */}
 
             {advanced.cv_folds > 0 && (
 
@@ -835,12 +1235,16 @@ function RunStep({
                   type="number"
                   min="1"
                   max="10"
-                  value={advanced.cv_repeats}
+                  value={
+                    advanced.cv_repeats
+                  }
                   onChange={(e) =>
                     setAdvanced({
                       ...advanced,
                       cv_repeats:
-                        Number(e.target.value),
+                        Number(
+                          e.target.value
+                        ),
                     })
                   }
                   className="input"
@@ -850,26 +1254,34 @@ function RunStep({
 
             )}
 
+            {/* Random state */}
 
             <Field label="Random State">
 
               <input
                 type="number"
-                value={advanced.random_state}
+                value={
+                  advanced.random_state
+                }
                 onChange={(e) => {
+
                   setMode("advanced");
 
                   setAdvanced({
                     ...advanced,
                     random_state:
-                      Number(e.target.value),
+                      Number(
+                        e.target.value
+                      ),
                   });
+
                 }}
                 className="input"
               />
 
             </Field>
 
+            {/* DL epochs */}
 
             <Field label="DL Epochs">
 
@@ -877,12 +1289,16 @@ function RunStep({
                 type="number"
                 min="5"
                 max="200"
-                value={advanced.dl_epochs}
+                value={
+                  advanced.dl_epochs
+                }
                 onChange={(e) =>
                   setAdvanced({
                     ...advanced,
                     dl_epochs:
-                      Number(e.target.value),
+                      Number(
+                        e.target.value
+                      ),
                   })
                 }
                 className="input"
@@ -890,6 +1306,7 @@ function RunStep({
 
             </Field>
 
+            {/* DL batch size */}
 
             <Field label="DL Batch Size">
 
@@ -897,12 +1314,16 @@ function RunStep({
                 type="number"
                 min="8"
                 max="256"
-                value={advanced.dl_batch_size}
+                value={
+                  advanced.dl_batch_size
+                }
                 onChange={(e) =>
                   setAdvanced({
                     ...advanced,
                     dl_batch_size:
-                      Number(e.target.value),
+                      Number(
+                        e.target.value
+                      ),
                   })
                 }
                 className="input"
@@ -910,11 +1331,14 @@ function RunStep({
 
             </Field>
 
+            {/* Primary metric */}
 
             <Field label="Primary Metric">
 
               <select
-                value={advanced.primary_metric}
+                value={
+                  advanced.primary_metric
+                }
                 onChange={(e) =>
                   setAdvanced({
                     ...advanced,
@@ -955,8 +1379,10 @@ function RunStep({
 
       </div>
 
+      {/* ------------------------------------------------------------------ */}
+      {/* Run                                                                 */}
+      {/* ------------------------------------------------------------------ */}
 
-      {/* Run */}
       <div className="card p-5 border-primary-200 bg-primary-50/40">
 
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -968,9 +1394,23 @@ function RunStep({
             </p>
 
             <p className="text-sm text-slate-600 mt-1">
-              {selectedModels.length} model(s) will
-              be evaluated using the configuration
-              above.
+
+              {selectedModels.length} model(s)
+              will be evaluated using the
+              configuration above.
+
+              {hybridEnabled && (
+                <>
+                  {" "}
+                  A{" "}
+                  <strong>
+                    {hybridization.method}
+                  </strong>{" "}
+                  hybrid model will also be
+                  evaluated.
+                </>
+              )}
+
             </p>
 
           </div>
@@ -979,7 +1419,8 @@ function RunStep({
             onClick={onRun}
             disabled={
               running ||
-              selectedModels.length === 0
+              selectedModels.length === 0 ||
+              !hybridReady
             }
             className="btn-primary px-7"
           >
@@ -990,22 +1431,35 @@ function RunStep({
 
         </div>
 
-
         {running && (
 
           <p className="text-sm text-slate-500 mt-4 text-center">
-            Training {selectedModels.length} model(s)
+
+            Training{" "}
+            {selectedModels.length}
+            {" "}
+            model(s)
+
+            {hybridEnabled && (
+              <>
+                {" "}
+                plus the selected hybrid model
+              </>
+            )}
+
             {compareBeforeAfter &&
             imbalanceMethod !== "none"
               ? " with baseline comparison"
               : ""}
-            . Deep learning models may take longer.
+
+            . Deep learning models may take
+            longer.
+
           </p>
 
         )}
 
       </div>
-
 
       <StepNavigation
         onBack={onBack}
@@ -1015,12 +1469,20 @@ function RunStep({
 
     </div>
   );
+
+  // -------------------------------------------------------------------------
+  // Helper used only by this component
+  // -------------------------------------------------------------------------
+
+  function featureSelectionLabel() {
+    return "Configured in previous step";
+  }
 }
 
 
-/* =====================================================
+/* ============================================================================
    COMMON COMPONENTS
-===================================================== */
+============================================================================ */
 
 function StepNavigation({
   onBack,
@@ -1054,7 +1516,14 @@ function StepNavigation({
 }
 
 
-function MiniStat({ label, value }) {
+/* ============================================================================
+   MINI STAT
+============================================================================ */
+
+function MiniStat({
+  label,
+  value,
+}) {
   return (
     <div className="card p-4">
 
@@ -1073,6 +1542,10 @@ function MiniStat({ label, value }) {
   );
 }
 
+
+/* ============================================================================
+   FLOW ITEM
+============================================================================ */
 
 function FlowItem({
   number,
@@ -1099,6 +1572,10 @@ function FlowItem({
 }
 
 
+/* ============================================================================
+   SUMMARY ROW
+============================================================================ */
+
 function SummaryRow({
   label,
   value,
@@ -1118,6 +1595,10 @@ function SummaryRow({
   );
 }
 
+
+/* ============================================================================
+   FIELD
+============================================================================ */
 
 function Field({
   label,

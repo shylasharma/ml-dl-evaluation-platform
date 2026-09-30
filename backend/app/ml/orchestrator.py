@@ -1,236 +1,1377 @@
 """
-Runs a full experiment: preprocess -> split -> (per model) resample training
-fold -> train -> evaluate -> aggregate -> generate insights & conclusion.
+ML/DL Model Evaluation & Comparison Platform
+Experiment Orchestrator
 
-Train/test split happens once, before any resampling, and resampling is
-re-applied per model only to that model's copy of the training fold — this
-keeps every model's evaluation leakage-free and directly comparable.
+Pipeline:
+
+Dataset
+    ↓
+Dataset Profiling
+    ↓
+Duplicate Handling
+    ↓
+Train/Test Split
+    ↓
+Preprocessing
+    ↓
+Feature Selection
+    ↓
+PCA / Dimensionality Reduction
+    ↓
+Imbalance Handling
+    ↓
+Model Training
+    ↓
+Evaluation
+    ↓
+Research Analysis
+    ↓
+Insights / Conclusion
+
+Leakage-safety rules:
+
+- Duplicate removal is deterministic and happens before splitting.
+- Preprocessing is fitted only on training data.
+- Feature selection is fitted only on training data.
+- PCA is fitted only on training data.
+- Test data is only transformed, never used for fitting.
+- Resampling is applied only to training data.
+- Cross-validation refits preprocessing and feature selection
+  independently inside every fold.
 """
+
 from typing import Dict, Any, List
+
 import pandas as pd
 
 from app.ml.dataset_analysis import profile_dataset
-from app.ml.preprocessing import prepare_data, resolve_preprocessing_config, drop_duplicate_rows
-from app.ml.imbalance import apply_imbalance_technique, ImbalanceError
-from app.ml.train_ml import train_and_evaluate_ml, ModelTrainingError
-from app.ml.train_dl import train_and_evaluate_dl
-from app.ml.registry import ML_MODELS, DL_MODELS, IMBALANCE_METHODS
-from app.ml.insights import generate_insights, generate_conclusion, generate_significance_insights
-from app.ml.cross_validation import cross_validate_experiment
-from app.utils.errors import FriendlyError
-from app.ml.statistical_tests import run_significance_tests
+
+from app.ml.preprocessing import (
+    prepare_data,
+    resolve_preprocessing_config,
+    drop_duplicate_rows,
+)
+
+from app.ml.feature_selection import (
+    resolve_feature_selection_config,
+    fit_transform_feature_selection,
+)
+
+from app.ml.dimensionality_reduction import (
+    fit_transform_pca,
+)
+
+from app.ml.feature_engineering import (
+    resolve_feature_engineering_config,
+    fit_transform_feature_engineering,
+)
+
+from app.ml.hybrid import (
+    resolve_hybridization_config,
+    train_and_evaluate_hybrid,
+    HybridizationError,
+    validate_hybridization_config,
+)
+
+from app.ml.imbalance import (
+    apply_imbalance_technique,
+    ImbalanceError,
+)
+
+from app.ml.train_ml import (
+    train_and_evaluate_ml,
+    ModelTrainingError,
+)
+
+from app.ml.train_dl import (
+    train_and_evaluate_dl,
+)
+
+from app.ml.registry import (
+    ML_MODELS,
+    DL_MODELS,
+    IMBALANCE_METHODS,
+)
+
+from app.ml.insights import (
+    generate_insights,
+    generate_conclusion,
+    generate_significance_insights,
+)
+
+from app.ml.cross_validation import (
+    cross_validate_experiment,
+)
+
+from app.utils.errors import (
+    FriendlyError,
+)
+
+from app.ml.statistical_tests import (
+    run_significance_tests,
+)
+
+from app.ml.research_analysis import (
+    build_research_summary,
+)
 
 
-def run_experiment(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
-    target_column = config.get("target_column")
-    # Profiling runs on the original, un-deduplicated data so the profile's
-    # `duplicate_rows` count always reflects what was actually in the upload,
-    # regardless of what the user chooses to do about it below.
-    profile = profile_dataset(df, target_hint=target_column)
-    target_column = profile["target_column"]
+# ============================================================================
+# CONFIGURATION RESOLVERS
+# ============================================================================
 
-    # Preprocessing config is resolved ONCE here (Phase 1) so every stage
-    # downstream (single-split path, CV path) sees the same, already-validated
-    # configuration. Later phases (feature engineering, feature selection,
-    # PCA) should follow the same pattern: resolve their own config here,
-    # apply whole-dataset/deterministic steps here, and pass the resolved
-    # config down to both `_run_single_split_experiment` and `_run_cv_experiment`.
-    preprocessing_cfg = resolve_preprocessing_config(config)
+def resolve_pca_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve PCA configuration into a plain dictionary.
 
-    # Duplicate-row removal is deterministic (no statistic is fit from the
-    # data) and is applied to the WHOLE dataset before the split -- see
-    # `drop_duplicate_rows` for why this order is leakage-safe rather than
-    # leakage-prone.
-    df, n_duplicates_removed = drop_duplicate_rows(df, preprocessing_cfg["duplicates"])
+    Supported configuration:
 
-    cv_folds = config.get("cv_folds", 0) or 0
+    {
+        "pca": {
+            "enabled": True,
+            "mode": "variance",
+            "variance": 0.95,
+            "n_components": None
+        }
+    }
+
+    OR:
+
+    {
+        "pca": {
+            "enabled": True,
+            "mode": "components",
+            "variance": 0.95,
+            "n_components": 10
+        }
+    }
+    """
+
+    cfg = config.get("pca")
+
+    if not cfg:
+        return {
+            "enabled": False,
+            "mode": "variance",
+            "variance": 0.95,
+            "n_components": None,
+        }
+
+    if hasattr(cfg, "model_dump"):
+        cfg = cfg.model_dump()
+
+    elif hasattr(cfg, "dict"):
+        cfg = cfg.dict()
+
+    cfg = cfg or {}
+
+    return {
+        "enabled": bool(
+            cfg.get("enabled", False)
+        ),
+        "mode": cfg.get(
+            "mode",
+            "variance",
+        ),
+        "variance": cfg.get(
+            "variance",
+            0.95,
+        ),
+        "n_components": cfg.get(
+            "n_components"
+        ),
+    }
+
+
+# ============================================================================
+# FEATURE ENGINEERING CONFIGURATION RESOLVER
+# ============================================================================
+
+def resolve_feature_engineering_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve feature-engineering configuration into a plain dictionary."""
+    cfg = config.get("feature_engineering")
+
+    if not cfg:
+        return {
+            "enabled": False,
+            "polynomial": False,
+            "polynomial_degree": 2,
+            "interactions": False,
+            "log_transform": False,
+            "ratio_features": False,
+            "max_interaction_features": None,
+        }
+
+    if hasattr(cfg, "model_dump"):
+        cfg = cfg.model_dump()
+    elif hasattr(cfg, "dict"):
+        cfg = cfg.dict()
+
+    cfg = cfg or {}
+
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "polynomial": bool(cfg.get("polynomial", False)),
+        "polynomial_degree": int(cfg.get("polynomial_degree", 2)),
+        "interactions": bool(cfg.get("interactions", False)),
+        "log_transform": bool(cfg.get("log_transform", False)),
+        "ratio_features": bool(cfg.get("ratio_features", False)),
+        "max_interaction_features": cfg.get("max_interaction_features"),
+    }
+
+
+# ============================================================================
+# HYBRIDIZATION CONFIGURATION RESOLVER
+# ============================================================================
+
+def resolve_hybridization_config_from_experiment(
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve the experiment's optional hybridization configuration."""
+    return resolve_hybridization_config(
+        config.get("hybridization")
+    )
+
+
+# ============================================================================
+# MAIN EXPERIMENT ENTRY POINT
+# ============================================================================
+
+def run_experiment(
+    df: pd.DataFrame,
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Run the complete ML/DL experiment pipeline.
+
+    Current stages:
+
+        Dataset profiling
+        Duplicate handling
+        Preprocessing
+        Feature selection
+        PCA
+        Imbalance handling
+        ML/DL training
+        Evaluation
+        Research analysis
+
+    Future stages:
+
+        Feature engineering
+        Hybridization
+        Model recommendation
+    """
+
+    # ------------------------------------------------------------------------
+    # 1. DATASET PROFILING
+    # ------------------------------------------------------------------------
+
+    target_column = config.get(
+        "target_column"
+    )
+
+    profile = profile_dataset(
+        df,
+        target_hint=target_column,
+    )
+
+    target_column = profile[
+        "target_column"
+    ]
+
+    # ------------------------------------------------------------------------
+    # 2. RESOLVE CONFIGURATION
+    # ------------------------------------------------------------------------
+
+    preprocessing_cfg = (
+        resolve_preprocessing_config(
+            config
+        )
+    )
+
+    feature_selection_cfg = (
+        resolve_feature_selection_config(
+            config
+        )
+    )
+
+    feature_engineering_cfg = resolve_feature_engineering_config(
+        config
+    )
+
+    pca_cfg = resolve_pca_config(
+        config
+    )
+
+    hybridization_cfg = (
+        resolve_hybridization_config_from_experiment(
+            config
+        )
+    )
+
+    # ------------------------------------------------------------------------
+    # 3. DUPLICATE HANDLING
+    # ------------------------------------------------------------------------
+
+    # Duplicate removal is deterministic.
+    #
+    # It does not learn any statistics from
+    # the dataset, therefore it is safe to
+    # perform before train/test splitting.
+
+    df, n_duplicates_removed = (
+        drop_duplicate_rows(
+            df,
+            preprocessing_cfg[
+                "duplicates"
+            ],
+        )
+    )
+
+    # ------------------------------------------------------------------------
+    # 4. CHOOSE SINGLE SPLIT OR CV
+    # ------------------------------------------------------------------------
+
+    cv_folds = config.get(
+        "cv_folds",
+        0,
+    ) or 0
+
     if cv_folds and cv_folds >= 2:
-        return _run_cv_experiment(df, config, profile, target_column, preprocessing_cfg, n_duplicates_removed)
-    return _run_single_split_experiment(df, config, profile, target_column, preprocessing_cfg, n_duplicates_removed)
+
+        return _run_cv_experiment(
+            df=df,
+            config=config,
+            profile=profile,
+            target_column=target_column,
+            preprocessing_cfg=(
+                preprocessing_cfg
+            ),
+            feature_selection_cfg=(
+                feature_selection_cfg
+            ),
+            feature_engineering_cfg=(
+                feature_engineering_cfg
+            ),
+            pca_cfg=pca_cfg,
+            hybridization_cfg=hybridization_cfg,
+            n_duplicates_removed=(
+                n_duplicates_removed
+            ),
+        )
+
+    return _run_single_split_experiment(
+        df=df,
+        config=config,
+        profile=profile,
+        target_column=target_column,
+        preprocessing_cfg=(
+            preprocessing_cfg
+        ),
+        feature_selection_cfg=(
+            feature_selection_cfg
+        ),
+        feature_engineering_cfg=(
+            feature_engineering_cfg
+        ),
+        pca_cfg=pca_cfg,
+        hybridization_cfg=hybridization_cfg,
+        n_duplicates_removed=(
+            n_duplicates_removed
+        ),
+    )
 
 
-def _run_single_split_experiment(df, config, profile, target_column,
-                                  preprocessing_cfg: Dict[str, str], n_duplicates_removed: int) -> Dict[str, Any]:
-    numeric_features = profile["numeric_features"]
-    categorical_features = profile["categorical_features"]
+# ============================================================================
+# SINGLE TRAIN / TEST EXPERIMENT
+# ============================================================================
 
-    test_size = config.get("test_size", 0.25)
-    random_state = config.get("random_state", 42)
-    imbalance_key = config.get("imbalance_method", "none")
-    models_selected: List[str] = config["models"]
-    dl_epochs = config.get("dl_epochs", 30)
-    dl_batch_size = config.get("dl_batch_size", 32)
-    compare_before_after = config.get("compare_before_after", False)
-    primary_metric = config.get("primary_metric", "f1")
+def _run_single_split_experiment(
+    df,
+    config,
+    profile,
+    target_column,
+    preprocessing_cfg: Dict[str, Any],
+    feature_selection_cfg: Dict[str, Any],
+    feature_engineering_cfg: Dict[str, Any],
+    pca_cfg: Dict[str, Any],
+    hybridization_cfg: Dict[str, Any],
+    n_duplicates_removed: int,
+) -> Dict[str, Any]:
+
+    numeric_features = profile[
+        "numeric_features"
+    ]
+
+    categorical_features = profile[
+        "categorical_features"
+    ]
+
+    # ------------------------------------------------------------------------
+    # Experiment configuration
+    # ------------------------------------------------------------------------
+
+    test_size = config.get(
+        "test_size",
+        0.25,
+    )
+
+    random_state = config.get(
+        "random_state",
+        42,
+    )
+
+    imbalance_key = config.get(
+        "imbalance_method",
+        "none",
+    )
+
+    models_selected: List[str] = (
+        config["models"]
+    )
+
+    dl_epochs = config.get(
+        "dl_epochs",
+        30,
+    )
+
+    dl_batch_size = config.get(
+        "dl_batch_size",
+        32,
+    )
+
+    compare_before_after = config.get(
+        "compare_before_after",
+        False,
+    )
+
+    primary_metric = config.get(
+        "primary_metric",
+        "f1",
+    )
+
+    # ------------------------------------------------------------------------
+    # Validate imbalance method
+    # ------------------------------------------------------------------------
 
     if imbalance_key not in IMBALANCE_METHODS:
-        raise ValueError(f"Unknown imbalance method '{imbalance_key}'.")
-    imbalance_label = IMBALANCE_METHODS[imbalance_key].label
 
-    # `preprocessing_cfg` is fit ONLY on X_train inside `prepare_data` (median/
-    # mean/most-frequent statistics and the scaler's mean/std or min/max are
-    # all learned from the training split only, then merely applied to the
-    # test split) -- this behaviour is unchanged from before Phase 1.
-    X_train, X_test, y_train, y_test, pipeline, label_encoder, n_classes, preprocessing_applied = prepare_data(
-        df, target_column, numeric_features, categorical_features,
-        test_size=test_size, random_state=random_state, preprocessing=preprocessing_cfg,
+        raise ValueError(
+            f"Unknown imbalance method "
+            f"'{imbalance_key}'."
+        )
+
+    imbalance_label = (
+        IMBALANCE_METHODS[
+            imbalance_key
+        ].label
     )
 
-    def _train_one(model_key: str, method: str):
-        try:
-            X_res, y_res, class_weight = apply_imbalance_technique(
-                X_train, y_train, method, random_state=random_state
+    # ------------------------------------------------------------------------
+    # 5. PREPROCESSING
+    # ------------------------------------------------------------------------
+
+    # prepare_data performs:
+    #
+    # Train/test split
+    # ↓
+    # Fit preprocessing on X_train
+    # ↓
+    # Transform X_train
+    # ↓
+    # Transform X_test
+    #
+    # No test-set statistics are used
+    # during fitting.
+
+    (
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        pipeline,
+        label_encoder,
+        n_classes,
+        preprocessing_applied,
+        feature_names,
+    ) = prepare_data(
+        df,
+        target_column,
+        numeric_features,
+        categorical_features,
+        test_size=test_size,
+        random_state=random_state,
+        preprocessing=preprocessing_cfg,
+    )
+
+    # ------------------------------------------------------------------------
+    # 6. FEATURE SELECTION
+    # ------------------------------------------------------------------------
+
+    original_feature_count = len(
+        feature_names
+    )
+
+    feature_selection_applied = {
+        "enabled": False,
+        "method": "none",
+        "original_features": (
+            original_feature_count
+        ),
+        "selected_features": (
+            original_feature_count
+        ),
+        "selected_feature_names": (
+            feature_names
+        ),
+    }
+
+    if feature_selection_cfg.get(
+        "enabled",
+        False,
+    ):
+
+        (
+            X_train,
+            X_test,
+            feature_selection_applied,
+        ) = fit_transform_feature_selection(
+            X_train=X_train,
+            X_test=X_test,
+            y_train=y_train,
+            feature_names=feature_names,
+            config=feature_selection_cfg,
+            random_state=random_state,
+        )
+
+        # Update feature names when
+        # feature-selection returns them.
+
+        selected_names = (
+            feature_selection_applied.get(
+                "selected_feature_names"
             )
-        except ImbalanceError as exc:
-            return {"model_key": model_key,
-                    "model_label": ML_MODELS.get(model_key, DL_MODELS.get(model_key)).label,
-                    "family": "ML" if model_key in ML_MODELS else "DL",
-                    "error": str(exc)}
+        )
+
+        if selected_names:
+            feature_names = (
+                selected_names
+            )
+
+    # ------------------------------------------------------------------------
+    # 7. FEATURE ENGINEERING
+    # ------------------------------------------------------------------------
+
+    # Feature engineering is fitted ONLY on the training data.
+    # X_test is transformed using the fitted engineering configuration.
+    # This keeps the stage leakage-safe.
+
+    feature_engineering_applied = {
+        "enabled": False,
+        "polynomial": False,
+        "polynomial_degree": 2,
+        "interactions": False,
+        "log_transform": False,
+        "ratio_features": False,
+        "max_interaction_features": None,
+        "original_features": len(feature_names),
+        "engineered_features": len(feature_names),
+        "feature_names": feature_names,
+    }
+
+    (
+        X_train,
+        X_test,
+        feature_engineering_applied,
+    ) = fit_transform_feature_engineering(
+        X_train=X_train,
+        X_test=X_test,
+        feature_names=feature_names,
+        config=feature_engineering_cfg,
+        random_state=random_state,
+    )
+
+    engineered_names = feature_engineering_applied.get(
+        "feature_names"
+    ) or feature_engineering_applied.get(
+        "engineered_feature_names"
+    )
+
+    if engineered_names:
+        feature_names = engineered_names
+
+    # ------------------------------------------------------------------------
+    # 8. PCA / DIMENSIONALITY REDUCTION
+    # ------------------------------------------------------------------------
+
+    # IMPORTANT:
+    #
+    # PCA is fitted ONLY on X_train.
+    #
+    # X_test is transformed using the
+    # already-fitted PCA object.
+    #
+    # Therefore PCA cannot learn anything
+    # from the test set.
+
+    (
+        X_train,
+        X_test,
+        pca_applied,
+    ) = fit_transform_pca(
+        X_train=X_train,
+        X_test=X_test,
+        feature_names=feature_names,
+        config=pca_cfg,
+        random_state=random_state,
+    )
+
+    if pca_applied.get(
+        "enabled",
+        False,
+    ):
+
+        feature_names = (
+            pca_applied.get(
+                "component_names",
+                feature_names,
+            )
+        )
+
+    # ------------------------------------------------------------------------
+    # HYBRIDIZATION VALIDATION
+    # ------------------------------------------------------------------------
+
+    if hybridization_cfg.get("enabled", False):
+        try:
+            hybridization_cfg = validate_hybridization_config(
+                hybridization_cfg
+            )
+        except HybridizationError as exc:
+            raise FriendlyError(str(exc)) from exc
+
+    # ------------------------------------------------------------------------
+    # Helper: train one model
+    # ------------------------------------------------------------------------
+
+    def _train_one(
+        model_key: str,
+        method: str,
+    ):
+
+        # ---------------------------------------------------------------
+        # 8. IMBALANCE HANDLING
+        # ---------------------------------------------------------------
+
+        # Resampling is performed ONLY on
+        # training data.
+        #
+        # X_test and y_test remain untouched.
 
         try:
-            if model_key in ML_MODELS:
-                return train_and_evaluate_ml(
-                    model_key, X_res, y_res, X_test, y_test,
-                    n_classes=n_classes, class_weight=class_weight, random_state=random_state,
-                )
-            elif model_key in DL_MODELS:
-                return train_and_evaluate_dl(
-                    model_key, X_res, y_res, X_test, y_test,
-                    n_classes=n_classes, class_weight=class_weight,
-                    epochs=dl_epochs, batch_size=dl_batch_size, random_state=random_state,
-                )
-            else:
-                return {"model_key": model_key, "model_label": model_key,
-                        "family": "unknown", "error": f"Unknown model '{model_key}'."}
-        except ModelTrainingError as exc:
-            family = "ML" if model_key in ML_MODELS else "DL"
-            label = ML_MODELS.get(model_key, DL_MODELS.get(model_key, None))
-            return {"model_key": model_key,
-                    "model_label": label.label if label else model_key,
-                    "family": family, "error": str(exc)}
 
-    results = [_train_one(m, imbalance_key) for m in models_selected]
+            X_res, y_res, class_weight = (
+                apply_imbalance_technique(
+                    X_train,
+                    y_train,
+                    method,
+                    random_state=random_state,
+                )
+            )
 
-    before_after = None
-    if compare_before_after and imbalance_key != "none":
-        before_after = {}
-        for m in models_selected:
-            before = _train_one(m, "none")
-            after = next((r for r in results if r["model_key"] == m), None)
-            before_after[m] = {
-                "model_label": before.get("model_label", m),
-                "before": before if "error" not in before else {},
-                "after": after if after and "error" not in after else {},
+        except ImbalanceError as exc:
+
+            model_spec = ML_MODELS.get(
+                model_key,
+                DL_MODELS.get(model_key),
+            )
+
+            return {
+                "model_key": model_key,
+
+                "model_label": (
+                    model_spec.label
+                    if model_spec
+                    else model_key
+                ),
+
+                "family": (
+                    "ML"
+                    if model_key in ML_MODELS
+                    else "DL"
+                ),
+
+                "error": str(exc),
             }
 
+        # ---------------------------------------------------------------
+        # 9. MODEL TRAINING + EVALUATION
+        # ---------------------------------------------------------------
+
+        try:
+
+            if model_key in ML_MODELS:
+
+                result = (
+                    train_and_evaluate_ml(
+                        model_key,
+                        X_res,
+                        y_res,
+                        X_test,
+                        y_test,
+                        n_classes=n_classes,
+                        class_weight=(
+                            class_weight
+                        ),
+                        random_state=(
+                            random_state
+                        ),
+                    )
+                )
+
+            elif model_key in DL_MODELS:
+
+                result = (
+                    train_and_evaluate_dl(
+                        model_key,
+                        X_res,
+                        y_res,
+                        X_test,
+                        y_test,
+                        n_classes=n_classes,
+                        class_weight=(
+                            class_weight
+                        ),
+                        epochs=dl_epochs,
+                        batch_size=(
+                            dl_batch_size
+                        ),
+                        random_state=(
+                            random_state
+                        ),
+                    )
+                )
+
+            else:
+
+                return {
+                    "model_key": model_key,
+                    "model_label": model_key,
+                    "family": "unknown",
+                    "error": (
+                        f"Unknown model "
+                        f"'{model_key}'."
+                    ),
+                }
+
+            return result
+
+        except ModelTrainingError as exc:
+
+            family = (
+                "ML"
+                if model_key in ML_MODELS
+                else "DL"
+            )
+
+            label = ML_MODELS.get(
+                model_key,
+                DL_MODELS.get(model_key),
+            )
+
+            return {
+                "model_key": model_key,
+
+                "model_label": (
+                    label.label
+                    if label
+                    else model_key
+                ),
+
+                "family": family,
+
+                "error": str(exc),
+            }
+
+    # ------------------------------------------------------------------------
+    # 10. TRAIN ALL SELECTED MODELS
+    # ------------------------------------------------------------------------
+
+    results = [
+        _train_one(
+            model_key=model_key,
+            method=imbalance_key,
+        )
+        for model_key in models_selected
+    ]
+
+    # ------------------------------------------------------------------------
+    # HYBRID MODEL TRAINING
+    # ------------------------------------------------------------------------
+
+    if hybridization_cfg.get("enabled", False):
+        try:
+            X_hybrid, y_hybrid, hybrid_class_weight = (
+                apply_imbalance_technique(
+                    X_train,
+                    y_train,
+                    imbalance_key,
+                    random_state=random_state,
+                )
+            )
+
+            hybrid_result = train_and_evaluate_hybrid(
+                config=hybridization_cfg,
+                X_train=X_hybrid,
+                y_train=y_hybrid,
+                X_test=X_test,
+                y_test=y_test,
+                n_classes=n_classes,
+                class_weight=hybrid_class_weight,
+                random_state=random_state,
+            )
+
+            results.append(hybrid_result)
+
+        except (ImbalanceError, HybridizationError) as exc:
+            results.append(
+                {
+                    "model_key": (
+                        "hybrid_"
+                        + hybridization_cfg.get(
+                            "method",
+                            "unknown",
+                        )
+                    ),
+                    "model_label": (
+                        "Hybrid — "
+                        + hybridization_cfg.get(
+                            "method",
+                            "unknown",
+                        ).replace("_", " ").title()
+                    ),
+                    "family": "Hybrid",
+                    "error": str(exc),
+                    "hybridization": hybridization_cfg,
+                }
+            )
+
+    # ------------------------------------------------------------------------
+    # 11. BEFORE / AFTER IMBALANCE COMPARISON
+    # ------------------------------------------------------------------------
+
+    before_after = None
+
+    if (
+        compare_before_after
+        and imbalance_key != "none"
+    ):
+
+        before_after = {}
+
+        for model_key in models_selected:
+
+            before = _train_one(
+                model_key,
+                "none",
+            )
+
+            after = next(
+                (
+                    result
+                    for result in results
+                    if result["model_key"]
+                    == model_key
+                ),
+                None,
+            )
+
+            before_after[
+                model_key
+            ] = {
+
+                "model_label": before.get(
+                    "model_label",
+                    model_key,
+                ),
+
+                "before": (
+                    before
+                    if "error" not in before
+                    else {}
+                ),
+
+                "after": (
+                    after
+                    if after
+                    and "error" not in after
+                    else {}
+                ),
+            }
+
+    # ------------------------------------------------------------------------
+    # 12. AUTOMATIC INSIGHTS
+    # ------------------------------------------------------------------------
+
     insights = generate_insights(
-        results, dataset_profile=profile,
-        imbalance_method_label=imbalance_label,
+        results,
+        dataset_profile=profile,
+        imbalance_method_label=(
+            imbalance_label
+        ),
         before_after=before_after,
     )
+
+    # ------------------------------------------------------------------------
+    # 13. AUTOMATIC CONCLUSION
+    # ------------------------------------------------------------------------
+
     conclusion = generate_conclusion(
-        results, dataset_profile=profile,
-        imbalance_method_label=imbalance_label,
+        results,
+        dataset_profile=profile,
+        imbalance_method_label=(
+            imbalance_label
+        ),
         primary_metric=primary_metric,
     )
 
+    # ------------------------------------------------------------------------
+    # 14. RESEARCH SUMMARY
+    # ------------------------------------------------------------------------
+
+    research_summary = (
+        build_research_summary(
+            results=results,
+            before_after=before_after,
+            dataset_profile=profile,
+            imbalance_method=(
+                imbalance_label
+            ),
+            random_state=random_state,
+        )
+    )
+
+    # ------------------------------------------------------------------------
+    # 15. FINAL RESULT
+    # ------------------------------------------------------------------------
+
     return {
+
         "dataset_profile": profile,
+
         "imbalance_method": imbalance_key,
-        "imbalance_method_label": imbalance_label,
+
+        "imbalance_method_label": (
+            imbalance_label
+        ),
+
         "n_classes": n_classes,
-        "class_labels": [str(c) for c in label_encoder.classes_],
+
+        "class_labels": [
+            str(c)
+            for c in label_encoder.classes_
+        ],
+
         "cv_enabled": False,
+
         "results": results,
+
         "before_after": before_after,
+
+        "research_summary": (
+            research_summary
+        ),
+
         "insights": insights,
+
         "conclusion": conclusion,
-        # What was actually applied -- always present, even for legacy requests
-        # that never sent a `preprocessing` block, so results are self-describing.
-        "preprocessing": {**preprocessing_applied, "duplicate_rows_removed": n_duplicates_removed},
+
+        # --------------------------------------------------------------
+        # Preprocessing information
+        # --------------------------------------------------------------
+
+        "preprocessing": {
+            **preprocessing_applied,
+            "duplicate_rows_removed": (
+                n_duplicates_removed
+            ),
+        },
+
+        # --------------------------------------------------------------
+        # Feature selection information
+        # --------------------------------------------------------------
+
+        "feature_selection": (
+            feature_selection_applied
+        ),
+
+        # --------------------------------------------------------------
+        # Feature engineering information
+        # --------------------------------------------------------------
+
+        "feature_engineering": feature_engineering_applied,
+
+        # --------------------------------------------------------------
+        # PCA information
+        # --------------------------------------------------------------
+
+        "pca": pca_applied,
+
+        "hybridization": hybridization_cfg,
     }
 
 
-def _run_cv_experiment(df, config, profile, target_column,
-                        preprocessing_cfg: Dict[str, str], n_duplicates_removed: int) -> Dict[str, Any]:
-    from sklearn.preprocessing import LabelEncoder
+# ============================================================================
+# CROSS-VALIDATION EXPERIMENT
+# ============================================================================
 
-    numeric_features = profile["numeric_features"]
-    categorical_features = profile["categorical_features"]
+def _run_cv_experiment(
+    df,
+    config,
+    profile,
+    target_column,
+    preprocessing_cfg: Dict[str, Any],
+    feature_selection_cfg: Dict[str, Any],
+    feature_engineering_cfg: Dict[str, Any],
+    pca_cfg: Dict[str, Any],
+    hybridization_cfg: Dict[str, Any],
+    n_duplicates_removed: int,
+) -> Dict[str, Any]:
 
-    random_state = config.get("random_state", 42)
-    imbalance_key = config.get("imbalance_method", "none")
-    models_selected: List[str] = config["models"]
-    dl_epochs = config.get("dl_epochs", 30)
-    dl_batch_size = config.get("dl_batch_size", 32)
-    primary_metric = config.get("primary_metric", "f1")
-    n_splits = int(config.get("cv_folds", 5))
-    n_repeats = max(1, int(config.get("cv_repeats", 1)))
+    from sklearn.preprocessing import (
+        LabelEncoder,
+    )
+
+    numeric_features = profile[
+        "numeric_features"
+    ]
+
+    categorical_features = profile[
+        "categorical_features"
+    ]
+
+    random_state = config.get(
+        "random_state",
+        42,
+    )
+
+    imbalance_key = config.get(
+        "imbalance_method",
+        "none",
+    )
+
+    models_selected: List[str] = (
+        config["models"]
+    )
+
+    dl_epochs = config.get(
+        "dl_epochs",
+        30,
+    )
+
+    dl_batch_size = config.get(
+        "dl_batch_size",
+        32,
+    )
+
+    primary_metric = config.get(
+        "primary_metric",
+        "f1",
+    )
+
+    n_splits = int(
+        config.get(
+            "cv_folds",
+            5,
+        )
+    )
+
+    n_repeats = max(
+        1,
+        int(
+            config.get(
+                "cv_repeats",
+                1,
+            )
+        ),
+    )
+
+    # ------------------------------------------------------------------------
+    # Validate imbalance method
+    # ------------------------------------------------------------------------
 
     if imbalance_key not in IMBALANCE_METHODS:
-        raise ValueError(f"Unknown imbalance method '{imbalance_key}'.")
-    imbalance_label = IMBALANCE_METHODS[imbalance_key].label
 
-    clean_df = df.dropna(subset=[target_column]).reset_index(drop=True)
-    if clean_df.empty:
-        raise FriendlyError(f"The target column '{target_column}' has no values, so there is nothing to predict.")
-    label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(clean_df[target_column].astype(str))
-    n_classes = len(label_encoder.classes_)
-    if n_classes < 2:
-        raise FriendlyError(f"The target column '{target_column}' contains only one distinct value.")
-    X_df = clean_df[numeric_features + categorical_features]
-
-    min_class_count = int(pd_value_counts_min(y))
-    if min_class_count < n_splits:
         raise ValueError(
-            f"Cannot run {n_splits}-fold cross-validation: the smallest class has only "
-            f"{min_class_count} sample(s). Reduce the number of folds to at most {min_class_count}, "
-            f"or use a single train/test split instead."
+            f"Unknown imbalance method "
+            f"'{imbalance_key}'."
         )
 
-    # Each fold refits the whole preprocessing pipeline on that fold's training
-    # rows only (see `cross_validation.py`), using this same resolved config.
-    results = cross_validate_experiment(
-        X_df, y, numeric_features, categorical_features, n_classes,
-        models_selected, imbalance_key,
-        n_splits=n_splits, n_repeats=n_repeats, random_state=random_state,
-        dl_epochs=dl_epochs, dl_batch_size=dl_batch_size, preprocessing=preprocessing_cfg,
+    imbalance_label = (
+        IMBALANCE_METHODS[
+            imbalance_key
+        ].label
     )
 
-    significance = run_significance_tests(results, metric=primary_metric)
+    # ------------------------------------------------------------------------
+    # Clean target
+    # ------------------------------------------------------------------------
 
-    cv_info = {"n_splits": n_splits, "n_repeats": n_repeats,
-               "n_folds_requested": n_splits * n_repeats}
+    clean_df = (
+        df
+        .dropna(
+            subset=[target_column]
+        )
+        .reset_index(drop=True)
+    )
+
+    if clean_df.empty:
+
+        raise FriendlyError(
+            f"The target column "
+            f"'{target_column}' has no "
+            "values, so there is nothing "
+            "to predict."
+        )
+
+    # ------------------------------------------------------------------------
+    # Encode target
+    # ------------------------------------------------------------------------
+
+    label_encoder = LabelEncoder()
+
+    y = label_encoder.fit_transform(
+        clean_df[
+            target_column
+        ].astype(str)
+    )
+
+    n_classes = len(
+        label_encoder.classes_
+    )
+
+    if n_classes < 2:
+
+        raise FriendlyError(
+            f"The target column "
+            f"'{target_column}' contains "
+            "only one distinct value."
+        )
+
+    X_df = clean_df[
+        numeric_features
+        + categorical_features
+    ]
+
+    # ------------------------------------------------------------------------
+    # Validate number of folds
+    # ------------------------------------------------------------------------
+
+    min_class_count = int(
+        pd_value_counts_min(y)
+    )
+
+    if min_class_count < n_splits:
+
+        raise ValueError(
+            f"Cannot run {n_splits}-fold "
+            "cross-validation: the smallest "
+            "class has only "
+            f"{min_class_count} sample(s). "
+            f"Reduce the number of folds to "
+            f"at most {min_class_count}, or "
+            "use a single train/test split "
+            "instead."
+        )
+
+    # ------------------------------------------------------------------------
+    # CROSS-VALIDATION
+    # ------------------------------------------------------------------------
+
+    # Hybrid models must be fitted independently inside every CV fold.
+    # The current CV implementation does not yet expose hybridization,
+    # so never silently ignore an enabled hybrid configuration.
+    if hybridization_cfg.get("enabled", False):
+        raise FriendlyError(
+            "Hybridization is currently available for train/test "
+            "experiments. Disable CV to run a hybrid experiment. "
+            "Per-fold hybrid training will be added in the next CV stage."
+        )
+
+    # Feature selection is already supported
+    # by the CV layer.
+    #
+    # PCA must follow the same leakage-safe
+    # per-fold architecture.
+    #
+    # Therefore PCA configuration is passed
+    # into cross_validate_experiment.
+
+    results = cross_validate_experiment(
+        X_df,
+        y,
+        numeric_features,
+        categorical_features,
+        n_classes,
+        models_selected,
+        imbalance_key,
+        n_splits=n_splits,
+        n_repeats=n_repeats,
+        random_state=random_state,
+        dl_epochs=dl_epochs,
+        dl_batch_size=dl_batch_size,
+        preprocessing=preprocessing_cfg,
+        feature_engineering=(
+            feature_engineering_cfg
+        ),
+        feature_selection=(
+            feature_selection_cfg
+        ),
+        pca=pca_cfg,
+    )
+
+    # ------------------------------------------------------------------------
+    # STATISTICAL SIGNIFICANCE
+    # ------------------------------------------------------------------------
+
+    significance = run_significance_tests(
+        results,
+        metric=primary_metric,
+    )
+
+    cv_info = {
+        "n_splits": n_splits,
+        "n_repeats": n_repeats,
+        "n_folds_requested": (
+            n_splits * n_repeats
+        ),
+    }
+
+    # ------------------------------------------------------------------------
+    # INSIGHTS
+    # ------------------------------------------------------------------------
 
     insights = generate_insights(
-        results, dataset_profile=profile, imbalance_method_label=imbalance_label,
+        results,
+        dataset_profile=profile,
+        imbalance_method_label=(
+            imbalance_label
+        ),
     )
-    insights += generate_significance_insights(significance)
+
+    insights += (
+        generate_significance_insights(
+            significance
+        )
+    )
+
+    # ------------------------------------------------------------------------
+    # CONCLUSION
+    # ------------------------------------------------------------------------
 
     conclusion = generate_conclusion(
-        results, dataset_profile=profile, imbalance_method_label=imbalance_label,
-        primary_metric=primary_metric, cv_info=cv_info, significance=significance,
+        results,
+        dataset_profile=profile,
+        imbalance_method_label=(
+            imbalance_label
+        ),
+        primary_metric=primary_metric,
+        cv_info=cv_info,
+        significance=significance,
     )
 
+    # ------------------------------------------------------------------------
+    # RESEARCH SUMMARY
+    # ------------------------------------------------------------------------
+
+    research_summary = (
+        build_research_summary(
+            results=results,
+            before_after=None,
+            dataset_profile=profile,
+            imbalance_method=(
+                imbalance_label
+            ),
+            random_state=random_state,
+        )
+    )
+
+    # ------------------------------------------------------------------------
+    # FINAL CV RESULT
+    # ------------------------------------------------------------------------
+
     return {
+
         "dataset_profile": profile,
+
         "imbalance_method": imbalance_key,
-        "imbalance_method_label": imbalance_label,
+
+        "imbalance_method_label": (
+            imbalance_label
+        ),
+
         "n_classes": n_classes,
-        "class_labels": [str(c) for c in label_encoder.classes_],
+
+        "class_labels": [
+            str(c)
+            for c in label_encoder.classes_
+        ],
+
         "cv_enabled": True,
+
         "cv_info": cv_info,
+
         "results": results,
+
         "before_after": None,
+
         "significance": significance,
+
+        "research_summary": (
+            research_summary
+        ),
+
         "insights": insights,
+
         "conclusion": conclusion,
-        "preprocessing": {**preprocessing_cfg, "duplicate_rows_removed": n_duplicates_removed},
+
+        "preprocessing": {
+            **preprocessing_cfg,
+            "duplicate_rows_removed": (
+                n_duplicates_removed
+            ),
+        },
+
+        "feature_selection": (
+            feature_selection_cfg
+        ),
+
+        "feature_engineering": feature_engineering_cfg,
+
+        "pca": pca_cfg,
+
+        "hybridization": hybridization_cfg,
     }
 
 
+# ============================================================================
+# UTILITY
+# ============================================================================
+
 def pd_value_counts_min(y) -> int:
+    """
+    Return the number of samples
+    in the smallest class.
+    """
+
     import numpy as np
-    _, counts = np.unique(y, return_counts=True)
-    return int(counts.min())
+
+    _, counts = np.unique(
+        y,
+        return_counts=True,
+    )
+
+    return int(
+        counts.min()
+    )

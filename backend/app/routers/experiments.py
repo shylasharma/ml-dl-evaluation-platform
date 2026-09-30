@@ -143,3 +143,30 @@ def _serialize_experiment(e: Experiment):
         "error_message": e.error_message,
         "created_at": e.created_at.isoformat() if e.created_at else None,
     }
+@router.post("/research-summary")
+def research_summary(payload: dict):
+    """
+    Build a research-oriented summary from an already completed experiment.
+    """
+
+    results = payload.get("results", [])
+    before_after = payload.get("before_after")
+    dataset_profile = payload.get("dataset_profile")
+    imbalance_method = payload.get("imbalance_method_label")
+    random_state = payload.get("random_state", 42)
+
+    if not results:
+        raise HTTPException(
+            status_code=400,
+            detail="No experiment results were supplied."
+        )
+
+    from app.ml.research_analysis import build_research_summary
+
+    return build_research_summary(
+        results=results,
+        before_after=before_after,
+        dataset_profile=dataset_profile,
+        imbalance_method=imbalance_method,
+        random_state=random_state,
+    )

@@ -11,6 +11,7 @@ import PrCurve from "../components/charts/PrCurve.jsx";
 import ClassDistribution from "../components/charts/ClassDistribution.jsx";
 import CVResultsPanel from "../components/charts/CVResultsPanel.jsx";
 import SignificanceTests from "../components/charts/SignificanceTests.jsx";
+import ResearchSummary from "../components/research/ResearchSummary.jsx";
 
 const CURVE_COLORS = ["#4f46e5", "#0d9488", "#d97706", "#e11d48", "#0284c7", "#7c3aed", "#65a30d"];
 
@@ -84,7 +85,9 @@ export default function Dashboard() {
 
       {r.cv_enabled && <CVResultsPanel results={results} cvInfo={r.cv_info} />}
       {r.cv_enabled && <SignificanceTests significance={r.significance} />}
-
+{r.research_summary && (
+  <ResearchSummary research={r.research_summary} />
+)}
       {/* Model comparison */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-3">
