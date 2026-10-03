@@ -88,6 +88,10 @@ export default function Dashboard() {
 {r.research_summary && (
   <ResearchSummary research={r.research_summary} />
 )}
+      {r.pca_comparison?.enabled && (
+        <PCAComparisonSection comparison={r.pca_comparison} />
+      )}
+
       {/* Model comparison */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-3">
@@ -197,6 +201,141 @@ export default function Dashboard() {
         <Link to="/compare" className="btn-secondary">Compare Models in Detail →</Link>
         <Link to="/insights" className="btn-primary">View Insights & Conclusion →</Link>
       </div>
+    </div>
+  );
+}
+
+
+function PCAComparisonSection({ comparison }) {
+  const [metric, setMetric] = useState("f1");
+
+  const models = comparison?.models || [];
+  const pcaMeta = comparison?.pca?.pca_metadata || {};
+  const metrics = [
+    ["accuracy", "Accuracy"],
+    ["precision", "Precision"],
+    ["recall", "Recall"],
+    ["specificity", "Specificity"],
+    ["f1", "F1"],
+    ["roc_auc", "ROC-AUC"],
+    ["pr_auc", "PR-AUC"],
+    ["mcc", "MCC"],
+    ["balanced_accuracy", "Balanced Accuracy"],
+    ["g_mean", "G-Mean"],
+  ];
+
+  const format = (value) =>
+    typeof value === "number" && Number.isFinite(value)
+      ? value.toFixed(3)
+      : "—";
+
+  const formatDelta = (value) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    return `${value >= 0 ? "+" : ""}${value.toFixed(3)}`;
+  };
+
+  return (
+    <div className="card p-5 space-y-5">
+      <div>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-primary-600">
+              Feature Selection &amp; Dimensionality Reduction
+            </p>
+            <h2 className="font-semibold text-lg mt-1">
+              PCA vs No-PCA Experimental Comparison
+            </h2>
+            <p className="text-sm text-slate-500 mt-1">
+              The same experiment was evaluated with and without PCA. Only the PCA stage changes.
+            </p>
+          </div>
+          <span className="chip chip-active">Paired comparison</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <MiniPCAStat label="Original features" value={pcaMeta.original_feature_count ?? "—"} />
+        <MiniPCAStat label="PCA components" value={pcaMeta.component_count ?? "—"} />
+        <MiniPCAStat
+          label="Target variance"
+          value={
+            comparison?.pca_config?.mode === "components"
+              ? "Custom components"
+              : `${Math.round(Number(comparison?.pca_config?.variance ?? 0.95) * 100)}%`
+          }
+        />
+        <MiniPCAStat
+          label="Variance retained"
+          value={
+            typeof pcaMeta.variance_retained === "number"
+              ? `${(pcaMeta.variance_retained * 100).toFixed(2)}%`
+              : "—"
+          }
+        />
+      </div>
+
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="font-semibold">Metric-wise comparison</p>
+          <p className="text-xs text-slate-500 mt-1">Positive Δ means PCA minus No-PCA.</p>
+        </div>
+        <select
+          value={metric}
+          onChange={(e) => setMetric(e.target.value)}
+          className="border border-slate-300 rounded-lg px-3 py-2 bg-white text-sm"
+        >
+          {metrics.map(([key, label]) => (
+            <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="text-sm w-full border-collapse min-w-[720px]">
+          <thead>
+            <tr className="text-left text-xs text-slate-500 border-b border-border">
+              <th className="py-3 pr-4">Model</th>
+              <th className="py-3 pr-4">Family</th>
+              <th className="py-3 pr-4">No PCA</th>
+              <th className="py-3 pr-4">PCA</th>
+              <th className="py-3 pr-4">Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {models.map((model) => {
+              const values = model.metrics?.[metric] || {};
+              return (
+                <tr key={model.model_key} className="border-b border-border/60">
+                  <td className="py-3 pr-4 font-medium">{model.model_label}</td>
+                  <td className="py-3 pr-4">{model.family || "—"}</td>
+                  <td className="py-3 pr-4">{format(values.no_pca)}</td>
+                  <td className="py-3 pr-4">{format(values.pca)}</td>
+                  <td className={`py-3 pr-4 font-semibold ${typeof values.delta === "number" ? (values.delta > 0 ? "text-emerald-600" : values.delta < 0 ? "text-rose-600" : "text-slate-500") : "text-slate-400"}`}>
+                    {formatDelta(values.delta)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="rounded-lg border border-primary-100 bg-primary-50 p-4 text-sm text-primary-900">
+        <p className="font-medium">Research note</p>
+        <p className="mt-1 text-primary-800">
+          {comparison.comparison_note ||
+            "PCA and No-PCA use matched experimental settings so the observed metric differences can be measured rather than assumed."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function MiniPCAStat({ label, value }) {
+  return (
+    <div className="rounded-xl border border-border/70 bg-panel/40 p-3">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="font-semibold text-slate-900 mt-1">{value}</p>
     </div>
   );
 }

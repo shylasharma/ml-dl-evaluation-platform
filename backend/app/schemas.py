@@ -281,6 +281,7 @@ class ExperimentConfig(BaseModel):
     feature_engineering: Optional[FeatureEngineeringConfig] = None
     feature_selection: Optional[FeatureSelectionConfig] = None
     pca: Optional[PCAConfig] = None
+    compare_pca: bool = False
     hybridization: Optional[HybridizationConfig] = None
 
 

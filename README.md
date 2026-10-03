@@ -163,3 +163,63 @@ own file to try the full workflow in under a minute.
 - Hyperparameters use sensible library defaults rather than per-dataset
   tuning — Advanced Analysis exposes the parameters most worth tuning
   first (epochs, batch size, test size, random state).
+PCA VS NO-PCA COMPARISON UPDATE
+
+1. Replace backend/app/ml/orchestrator.py with the supplied file.
+
+2. In backend/app/schemas.py, add this field inside ExperimentConfig:
+
+    compare_pca: bool = False
+
+Place it near compare_before_after.
+
+3. Replace frontend/src/pages/NewExperiment.jsx with the supplied file.
+
+4. Copy these new frontend components:
+   - frontend/src/components/PCAComparisonPanel.jsx
+   - frontend/src/components/PCAComparisonResults.jsx
+
+5. In frontend/src/pages/Dashboard.jsx, add this import:
+
+import PCAComparisonResults from "../components/PCAComparisonResults.jsx";
+
+Then add this immediately after the CV/significance panels (before Model comparison):
+
+{r.pca_comparison?.enabled && (
+  <PCAComparisonResults comparison={r.pca_comparison} />
+)}
+
+6. Restart backend and frontend.
+
+7. Test:
+   - Select a dataset.
+   - Select at least one model.
+   - Open PCA settings and choose a PCA configuration.
+   - Turn ON "PCA vs No-PCA Comparison".
+   - Run the experiment.
+
+Expected result:
+The backend runs the same configuration twice: once without PCA and once with PCA. The dashboard shows F1, MCC, PR-AUC, Recall, Accuracy and Training Time for both branches plus delta values.
+
+Important:
+The comparison is descriptive. It does not declare PCA universally better. Both branches reuse the same dataset/configuration and only PCA is changed.
+
+HYBRIDIZATION REMOVAL UPDATE
+
+1. Replace:
+   frontend/src/pages/NewExperiment.jsx
+   with the included file.
+
+2. Replace:
+   backend/app/ml/orchestrator.py
+   with the included file.
+
+3. Delete these obsolete files from your project:
+   backend/app/ml/hybrid.py
+   frontend/src/components/HybridizationPanel.jsx
+
+4. Restart backend and frontend.
+
+The experiment now compares any selected ML and DL models side-by-side in the same experiment. No ensemble/hybrid model is created.
+
+PCA and PCA-vs-No-PCA comparison remain enabled.

@@ -64,7 +64,7 @@ const DEFAULT_CONFIG = {
   max_features: null,
 };
 
-export default function FeatureSelectionPanel({ value, onChange }) {
+export default function FeatureSelectionPanel({ value, onChange, featureCount }) {
   const cfg = {
     ...DEFAULT_CONFIG,
     ...(value || {}),
@@ -142,8 +142,71 @@ export default function FeatureSelectionPanel({ value, onChange }) {
         </span>
       </div>
 
+      {/* Starting feature information */}
+      <div className="mt-4 rounded-xl border border-violet-100 bg-violet-50/40 p-4">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-lg bg-violet-100 text-violet-700 grid place-items-center text-sm">
+            ①
+          </div>
+
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-slate-900">
+              Starting Feature Information
+            </p>
+
+            <p className="text-xs text-slate-500 mt-1">
+              This is the number of features available before feature
+              selection. The actual selected count is calculated after the
+              method is fitted on the training data.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                  Original Features
+                </p>
+                <p className="text-lg font-semibold text-slate-900 mt-1">
+                  {featureCount ?? "—"}
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                  Selection Status
+                </p>
+                <p className="text-sm font-semibold text-slate-900 mt-1">
+                  {cfg.enabled ? "Selection enabled" : "No selection"}
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                  Requested Features
+                </p>
+                <p className="text-lg font-semibold text-slate-900 mt-1">
+                  {cfg.enabled && cfg.k ? cfg.k : "—"}
+                </p>
+              </div>
+            </div>
+
+            {cfg.enabled && cfg.k && featureCount && (
+              <div className="mt-3 rounded-lg bg-white/80 border border-violet-100 px-3 py-2">
+                <p className="text-xs text-slate-600">
+                  Planned reduction:{" "}
+                  <span className="font-semibold text-slate-900">
+                    {featureCount} → {Math.min(cfg.k, featureCount)} features
+                  </span>
+                  . The final selected count is determined by the backend
+                  after fitting the selected method on training data.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* Main question */}
-      <div className="rounded-xl border border-border bg-panel p-4">
+      <div className="mt-4 rounded-xl border border-border bg-panel p-4">
 
         <p className="font-medium text-sm">
           Would you like to perform feature selection?

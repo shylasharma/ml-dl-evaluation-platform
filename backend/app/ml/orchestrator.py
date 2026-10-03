@@ -66,13 +66,6 @@ from app.ml.feature_engineering import (
     fit_transform_feature_engineering,
 )
 
-from app.ml.hybrid import (
-    resolve_hybridization_config,
-    train_and_evaluate_hybrid,
-    HybridizationError,
-    validate_hybridization_config,
-)
-
 from app.ml.imbalance import (
     apply_imbalance_technique,
     ImbalanceError,
@@ -220,17 +213,88 @@ def resolve_feature_engineering_config(config: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-# ============================================================================
-# HYBRIDIZATION CONFIGURATION RESOLVER
-# ============================================================================
-
-def resolve_hybridization_config_from_experiment(
-    config: Dict[str, Any],
+def _build_pca_comparison(
+    no_pca_result: Dict[str, Any],
+    pca_result: Dict[str, Any],
+    pca_config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Resolve the experiment's optional hybridization configuration."""
-    return resolve_hybridization_config(
-        config.get("hybridization")
-    )
+    """Build a model-by-model comparison between identical no-PCA and PCA runs."""
+
+    no_pca_by_model = {
+        row.get("model_key"): row
+        for row in no_pca_result.get("results", [])
+        if row.get("model_key")
+    }
+    pca_by_model = {
+        row.get("model_key"): row
+        for row in pca_result.get("results", [])
+        if row.get("model_key")
+    }
+
+    model_keys = list(dict.fromkeys(
+        list(no_pca_by_model.keys()) + list(pca_by_model.keys())
+    ))
+
+    metrics = [
+        "accuracy", "precision", "recall", "specificity", "f1",
+        "roc_auc", "pr_auc", "mcc", "balanced_accuracy", "g_mean",
+        "training_time_sec",
+    ]
+
+    models = []
+    for key in model_keys:
+        before = no_pca_by_model.get(key, {})
+        after = pca_by_model.get(key, {})
+        metric_values = {}
+        for metric in metrics:
+            no_value = before.get(metric)
+            pca_value = after.get(metric)
+            metric_values[metric] = {
+                "no_pca": no_value,
+                "pca": pca_value,
+                "delta": (
+                    pca_value - no_value
+                    if isinstance(no_value, (int, float))
+                    and isinstance(pca_value, (int, float))
+                    else None
+                ),
+            }
+        models.append({
+            "model_key": key,
+            "model_label": (
+                pca_by_model.get(key, {}).get("model_label")
+                or no_pca_by_model.get(key, {}).get("model_label")
+                or key
+            ),
+            "family": (
+                pca_by_model.get(key, {}).get("family")
+                or no_pca_by_model.get(key, {}).get("family")
+            ),
+            "no_pca_error": before.get("error"),
+            "pca_error": after.get("error"),
+            "metrics": metric_values,
+        })
+
+    return {
+        "enabled": True,
+        "pca_config": pca_config,
+        "no_pca": {
+            "enabled": False,
+            "result_count": len(no_pca_result.get("results", [])),
+        },
+        "pca": {
+            "enabled": True,
+            "result_count": len(pca_result.get("results", [])),
+            "pca_metadata": pca_result.get("pca"),
+        },
+        "models": models,
+        "metric_names": metrics,
+        "comparison_note": (
+            "Both branches use the same dataset, preprocessing, feature engineering, "
+            "feature selection, imbalance strategy, models, random state and evaluation "
+            "settings. Only PCA is changed."
+        ),
+    }
 
 
 # ============================================================================
@@ -259,7 +323,6 @@ def run_experiment(
     Future stages:
 
         Feature engineering
-        Hybridization
         Model recommendation
     """
 
@@ -304,11 +367,54 @@ def run_experiment(
         config
     )
 
-    hybridization_cfg = (
-        resolve_hybridization_config_from_experiment(
-            config
+    # ------------------------------------------------------------------------
+    # OPTIONAL PCA VS NO-PCA COMPARISON
+    # ------------------------------------------------------------------------
+    # Run the exact same experiment configuration twice, changing only the
+    # dimensionality-reduction stage. Nested runs disable comparison so this
+    # block cannot recurse. This keeps the comparison fair and preserves the
+    # existing leakage-safe pipeline in both branches.
+    compare_pca = bool(config.get("compare_pca", False))
+    if compare_pca:
+        base_config = dict(config)
+        base_config["compare_pca"] = False
+
+        no_pca_config = dict(base_config)
+        no_pca_config["pca"] = {
+            "enabled": False,
+            "mode": "variance",
+            "variance": 0.95,
+            "n_components": None,
+        }
+
+        pca_compare_config = dict(base_config)
+        requested_pca = dict(pca_cfg)
+        requested_pca["enabled"] = True
+        pca_compare_config["pca"] = requested_pca
+
+        no_pca_result = run_experiment(
+            df.copy(), no_pca_config
         )
-    )
+        pca_result = run_experiment(
+            df.copy(), pca_compare_config
+        )
+
+        comparison = _build_pca_comparison(
+            no_pca_result,
+            pca_result,
+            requested_pca,
+        )
+
+        # Use the explicitly requested PCA state as the primary result while
+        # attaching the paired comparison for the dashboard/report.
+        primary = (
+            pca_result
+            if pca_cfg.get("enabled", False)
+            else no_pca_result
+        )
+        primary["pca_comparison"] = comparison
+        primary["compare_pca"] = True
+        return primary
 
     # ------------------------------------------------------------------------
     # 3. DUPLICATE HANDLING
@@ -355,7 +461,6 @@ def run_experiment(
                 feature_engineering_cfg
             ),
             pca_cfg=pca_cfg,
-            hybridization_cfg=hybridization_cfg,
             n_duplicates_removed=(
                 n_duplicates_removed
             ),
@@ -376,7 +481,6 @@ def run_experiment(
             feature_engineering_cfg
         ),
         pca_cfg=pca_cfg,
-        hybridization_cfg=hybridization_cfg,
         n_duplicates_removed=(
             n_duplicates_removed
         ),
@@ -396,7 +500,6 @@ def _run_single_split_experiment(
     feature_selection_cfg: Dict[str, Any],
     feature_engineering_cfg: Dict[str, Any],
     pca_cfg: Dict[str, Any],
-    hybridization_cfg: Dict[str, Any],
     n_duplicates_removed: int,
 ) -> Dict[str, Any]:
 
@@ -640,18 +743,6 @@ def _run_single_split_experiment(
         )
 
     # ------------------------------------------------------------------------
-    # HYBRIDIZATION VALIDATION
-    # ------------------------------------------------------------------------
-
-    if hybridization_cfg.get("enabled", False):
-        try:
-            hybridization_cfg = validate_hybridization_config(
-                hybridization_cfg
-            )
-        except HybridizationError as exc:
-            raise FriendlyError(str(exc)) from exc
-
-    # ------------------------------------------------------------------------
     # Helper: train one model
     # ------------------------------------------------------------------------
 
@@ -805,57 +896,6 @@ def _run_single_split_experiment(
         )
         for model_key in models_selected
     ]
-
-    # ------------------------------------------------------------------------
-    # HYBRID MODEL TRAINING
-    # ------------------------------------------------------------------------
-
-    if hybridization_cfg.get("enabled", False):
-        try:
-            X_hybrid, y_hybrid, hybrid_class_weight = (
-                apply_imbalance_technique(
-                    X_train,
-                    y_train,
-                    imbalance_key,
-                    random_state=random_state,
-                )
-            )
-
-            hybrid_result = train_and_evaluate_hybrid(
-                config=hybridization_cfg,
-                X_train=X_hybrid,
-                y_train=y_hybrid,
-                X_test=X_test,
-                y_test=y_test,
-                n_classes=n_classes,
-                class_weight=hybrid_class_weight,
-                random_state=random_state,
-            )
-
-            results.append(hybrid_result)
-
-        except (ImbalanceError, HybridizationError) as exc:
-            results.append(
-                {
-                    "model_key": (
-                        "hybrid_"
-                        + hybridization_cfg.get(
-                            "method",
-                            "unknown",
-                        )
-                    ),
-                    "model_label": (
-                        "Hybrid — "
-                        + hybridization_cfg.get(
-                            "method",
-                            "unknown",
-                        ).replace("_", " ").title()
-                    ),
-                    "family": "Hybrid",
-                    "error": str(exc),
-                    "hybridization": hybridization_cfg,
-                }
-            )
 
     # ------------------------------------------------------------------------
     # 11. BEFORE / AFTER IMBALANCE COMPARISON
@@ -1018,7 +1058,6 @@ def _run_single_split_experiment(
 
         "pca": pca_applied,
 
-        "hybridization": hybridization_cfg,
     }
 
 
@@ -1035,7 +1074,6 @@ def _run_cv_experiment(
     feature_selection_cfg: Dict[str, Any],
     feature_engineering_cfg: Dict[str, Any],
     pca_cfg: Dict[str, Any],
-    hybridization_cfg: Dict[str, Any],
     n_duplicates_removed: int,
 ) -> Dict[str, Any]:
 
@@ -1189,16 +1227,6 @@ def _run_cv_experiment(
     # CROSS-VALIDATION
     # ------------------------------------------------------------------------
 
-    # Hybrid models must be fitted independently inside every CV fold.
-    # The current CV implementation does not yet expose hybridization,
-    # so never silently ignore an enabled hybrid configuration.
-    if hybridization_cfg.get("enabled", False):
-        raise FriendlyError(
-            "Hybridization is currently available for train/test "
-            "experiments. Disable CV to run a hybrid experiment. "
-            "Per-fold hybrid training will be added in the next CV stage."
-        )
-
     # Feature selection is already supported
     # by the CV layer.
     #
@@ -1351,7 +1379,6 @@ def _run_cv_experiment(
 
         "pca": pca_cfg,
 
-        "hybridization": hybridization_cfg,
     }
 
 

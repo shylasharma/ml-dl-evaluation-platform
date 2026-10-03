@@ -10,8 +10,8 @@ import PreprocessingPanel, {
 } from "../components/PreprocessingPanel.jsx";
 import FeatureSelectionPanel from "../components/FeatureSelectionPanel.jsx";
 import PCAPanel from "../components/PCAPanel.jsx";
-import HybridizationPanel from "../components/HybridizationPanel.jsx";
 import ModelRecommendationPanel from "../components/ModelRecommendationPanel.jsx";
+import PCAComparisonPanel from "../components/PCAComparisonPanel.jsx";
 
 // -----------------------------------------------------------------------------
 // Quick Analysis preset
@@ -103,17 +103,7 @@ export default function NewExperiment() {
     n_components: null,
   });
 
-  // ---------------------------------------------------------------------------
-  // Hybridization
-  // ---------------------------------------------------------------------------
-
-  const [hybridization, setHybridization] =
-    useState({
-      enabled: false,
-      method: "hard_voting",
-      base_models: [],
-      weights: null,
-    });
+  const [comparePca, setComparePca] = useState(false);
 
   // ---------------------------------------------------------------------------
   // Advanced configuration
@@ -198,42 +188,6 @@ export default function NewExperiment() {
       );
     }
 
-    // -----------------------------------------------------------------------
-    // Hybridization validation
-    // -----------------------------------------------------------------------
-
-    if (hybridization.enabled) {
-      if (advanced.cv_folds > 0) {
-        return notify(
-          "Hybridization currently requires single train/test split mode. Turn off cross-validation before running a hybrid experiment.",
-          "error"
-        );
-      }
-
-      if (
-        !hybridization.base_models ||
-        hybridization.base_models.length < 2
-      ) {
-        return notify(
-          "Select at least two base models for hybridization.",
-          "error"
-        );
-      }
-
-      const invalidBaseModels =
-        hybridization.base_models.filter(
-          (model) =>
-            !selectedModels.includes(model)
-        );
-
-      if (invalidBaseModels.length > 0) {
-        return notify(
-          "Every hybrid base model must also be selected in the model selection step.",
-          "error"
-        );
-      }
-    }
-
     setRunning(true);
 
     try {
@@ -258,7 +212,8 @@ export default function NewExperiment() {
 
         pca,
 
-        hybridization,
+        compare_pca: comparePca,
+
 
         ...advanced,
       };
@@ -402,6 +357,8 @@ export default function NewExperiment() {
           }
           pca={pca}
           setPca={setPca}
+          comparePca={comparePca}
+          setComparePca={setComparePca}
           onBack={() =>
             navigate("/dataset")
           }
@@ -458,12 +415,9 @@ export default function NewExperiment() {
           preprocessing={preprocessing}
           selectedModels={selectedModels}
           imbalanceMethod={imbalanceMethod}
-          hybridization={hybridization}
-          setHybridization={
-            setHybridization
-          }
           pca={pca}
           setPca={setPca}
+          comparePca={comparePca}
           compareBeforeAfter={
             compareBeforeAfter
           }
@@ -498,6 +452,8 @@ function PreprocessingStep({
   setFeatureSelection,
   pca,
   setPca,
+  comparePca,
+  setComparePca,
   onBack,
   onNext,
 }) {
@@ -576,12 +532,23 @@ function PreprocessingStep({
         <FeatureSelectionPanel
           value={featureSelection}
           onChange={setFeatureSelection}
+          featureCount={dataset.n_features}
         />
 
         <PCAPanel
           value={pca}
           onChange={setPca}
           featureCount={dataset.n_features}
+        />
+
+        <PCAComparisonPanel
+          value={{ enabled: comparePca }}
+          onChange={(enabled) => {
+            setComparePca(enabled);
+            if (enabled && !pca.enabled) {
+              setPca((current) => ({ ...current, enabled: true }));
+            }
+          }}
         />
 
       </div>
@@ -651,8 +618,31 @@ function ModelsStep({
   const canContinue =
     selectedModels.length > 0;
 
+  const applyRecommendedModels = (payload) => {
+    const models = Array.isArray(payload)
+      ? payload
+      : payload?.recommended_models ||
+        payload?.models ||
+        payload?.selected_models ||
+        [];
+
+    if (!Array.isArray(models) || models.length === 0) {
+      return;
+    }
+
+    setSelectedModels(models);
+  };
+
   return (
     <div className="space-y-5">
+
+      <ModelRecommendationPanel
+        dataset={dataset}
+        selectedModels={selectedModels}
+        onApplyRecommendations={applyRecommendedModels}
+        onUseRecommendations={applyRecommendedModels}
+        onModelsRecommended={applyRecommendedModels}
+      />
 
       <div className="card p-5">
 
@@ -687,12 +677,6 @@ function ModelsStep({
         />
 
       </div>
-
-      <ModelRecommendationPanel
-        dataset={dataset}
-        selectedModels={selectedModels}
-        onApplyRecommendations={setSelectedModels}
-      />
 
       <div className="flex items-center justify-between text-sm text-slate-500">
 
@@ -834,7 +818,7 @@ function BalancingStep({
           <FlowItem
             number="04"
             title="Train"
-            text="Fit every selected classifier and configured hybrid model."
+            text="Fit every selected ML and DL classifier for direct comparison."
           />
 
           <FlowItem
@@ -867,10 +851,8 @@ function RunStep({
   preprocessing,
   selectedModels,
   imbalanceMethod,
-  hybridization,
-  setHybridization,
   pca,
-  setPca,
+  comparePca,
   compareBeforeAfter,
   advanced,
   setAdvanced,
@@ -882,23 +864,6 @@ function RunStep({
   onBack,
   onRun,
 }) {
-  const hybridEnabled =
-    Boolean(hybridization?.enabled);
-
-  const hybridBaseModelCount =
-    hybridization?.base_models?.length ?? 0;
-
-  const hybridInvalidForCV =
-    hybridEnabled &&
-    advanced.cv_folds > 0;
-
-  const hybridReady =
-    !hybridEnabled ||
-    (
-      hybridBaseModelCount >= 2 &&
-      !hybridInvalidForCV
-    );
-
   return (
     <div className="space-y-5">
 
@@ -923,17 +888,7 @@ function RunStep({
 
           </div>
 
-          <span
-            className={
-              hybridReady
-                ? "chip chip-active"
-                : "chip"
-            }
-          >
-            {hybridReady
-              ? "Ready to run"
-              : "Configuration needs attention"}
-          </span>
+          <span className="chip chip-active">Ready to run</span>
 
         </div>
 
@@ -1022,29 +977,9 @@ function RunStep({
             }
           />
 
-          <SummaryRow
-            label="Hybridization"
-            value={
-              hybridEnabled
-                ? `${hybridization.method} (${hybridBaseModelCount} base models)`
-                : "Disabled"
-            }
-          />
-
         </div>
 
       </div>
-
-      {/* ------------------------------------------------------------------ */}
-      {/* Hybridization                                                      */}
-      {/* ------------------------------------------------------------------ */}
-
-      <HybridizationPanel
-        value={hybridization}
-        onChange={setHybridization}
-        selectedModels={selectedModels}
-        cvFolds={advanced.cv_folds}
-      />
 
       {/* ------------------------------------------------------------------ */}
       {/* PCA status                                                         */}
@@ -1187,23 +1122,6 @@ function RunStep({
                     cv_folds:
                       nextCvFolds,
                   });
-
-                  // If CV is enabled while a hybrid model is
-                  // configured, reset hybridization because the
-                  // current backend intentionally does not support
-                  // hybrid CV yet.
-                  if (
-                    nextCvFolds > 0 &&
-                    hybridization.enabled
-                  ) {
-                    setHybridization({
-                      ...hybridization,
-                      enabled: false,
-                    });
-
-                    // We deliberately do not show an error here.
-                    // The UI simply disables the hybrid configuration.
-                  }
 
                 }}
                 className="input"
@@ -1399,19 +1317,13 @@ function RunStep({
               will be evaluated using the
               configuration above.
 
-              {hybridEnabled && (
-                <>
-                  {" "}
-                  A{" "}
-                  <strong>
-                    {hybridization.method}
-                  </strong>{" "}
-                  hybrid model will also be
-                  evaluated.
-                </>
-              )}
-
             </p>
+
+            {comparePca && (
+              <p className="mt-2 text-sm text-primary-700">
+                PCA comparison: the experiment will run once without PCA and once with PCA using the same configuration.
+              </p>
+            )}
 
           </div>
 
@@ -1419,8 +1331,7 @@ function RunStep({
             onClick={onRun}
             disabled={
               running ||
-              selectedModels.length === 0 ||
-              !hybridReady
+              selectedModels.length === 0
             }
             className="btn-primary px-7"
           >
@@ -1439,13 +1350,6 @@ function RunStep({
             {selectedModels.length}
             {" "}
             model(s)
-
-            {hybridEnabled && (
-              <>
-                {" "}
-                plus the selected hybrid model
-              </>
-            )}
 
             {compareBeforeAfter &&
             imbalanceMethod !== "none"

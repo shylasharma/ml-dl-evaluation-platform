@@ -2,15 +2,36 @@
    PCA / DIMENSIONALITY REDUCTION PANEL
 ===================================================== */
 
+import React from "react";
+
+const DEFAULT_PCA = {
+  enabled: false,
+  mode: "variance",
+  variance: 0.95,
+  n_components: null,
+};
+
 function PCAPanel({ value, onChange, featureCount }) {
-  const pca = value || {
-    enabled: false,
-    mode: "variance",
-    variance: 0.95,
-    n_components: null,
+  const pca = {
+    ...DEFAULT_PCA,
+    ...(value || {}),
   };
 
+  /*
+   * Important:
+   * The parent component must provide a function here.
+   * This guard prevents a confusing "onChange is not a function"
+   * crash and makes the actual integration problem explicit.
+   */
   const update = (changes) => {
+    if (typeof onChange !== "function") {
+      console.error(
+        "PCAPanel: expected onChange to be a function, but received:",
+        onChange
+      );
+      return;
+    }
+
     onChange({
       ...pca,
       ...changes,
@@ -23,15 +44,18 @@ function PCAPanel({ value, onChange, featureCount }) {
         mode: "variance",
         n_components: null,
       });
-    } else {
-      update({
-        mode: "components",
-        n_components: Math.min(
-          2,
-          Math.max(1, featureCount || 1)
-        ),
-      });
+      return;
     }
+
+    const maxComponents = Math.max(
+      1,
+      Number(featureCount) || 1
+    );
+
+    update({
+      mode: "components",
+      n_components: Math.min(2, maxComponents),
+    });
   };
 
   const handleComponentChange = (event) => {
@@ -47,9 +71,37 @@ function PCAPanel({ value, onChange, featureCount }) {
     const number = Number(rawValue);
 
     update({
-      n_components: Number.isFinite(number)
-        ? number
-        : null,
+      n_components:
+        Number.isFinite(number) && number >= 1
+          ? number
+          : null,
+    });
+  };
+
+  const handleEnable = () => {
+    update({
+      enabled: true,
+      mode: "variance",
+      variance: 0.95,
+      n_components: null,
+    });
+  };
+
+  const handleDisable = () => {
+    update({
+      enabled: false,
+      mode: "variance",
+      variance: 0.95,
+      n_components: null,
+    });
+  };
+
+  const handleVarianceChange = (variance) => {
+    update({
+      enabled: true,
+      mode: "variance",
+      variance,
+      n_components: null,
     });
   };
 
@@ -59,7 +111,10 @@ function PCAPanel({ value, onChange, featureCount }) {
     (
       !pca.n_components ||
       pca.n_components < 1 ||
-      (featureCount && pca.n_components > featureCount)
+      (
+        featureCount &&
+        pca.n_components > featureCount
+      )
     );
 
   return (
@@ -78,10 +133,11 @@ function PCAPanel({ value, onChange, featureCount }) {
           </h3>
 
           <p className="text-sm text-slate-600 mt-1 max-w-3xl">
-            PCA reduces the number of input features while preserving
-            as much information as possible. PCA is applied after
-            preprocessing and feature selection and is fitted only
-            on training data to prevent data leakage.
+            PCA reduces the number of input features while
+            preserving as much information as possible.
+            It is applied after preprocessing and feature
+            selection and fitted only on training data to
+            prevent data leakage.
           </p>
         </div>
 
@@ -98,14 +154,7 @@ function PCAPanel({ value, onChange, featureCount }) {
 
           <button
             type="button"
-            onClick={() =>
-              update({
-                enabled: false,
-                mode: "variance",
-                variance: 0.95,
-                n_components: null,
-              })
-            }
+            onClick={handleDisable}
             className={`px-5 py-2 rounded-lg border transition ${
               !pca.enabled
                 ? "bg-slate-800 text-white border-slate-800"
@@ -117,14 +166,7 @@ function PCAPanel({ value, onChange, featureCount }) {
 
           <button
             type="button"
-            onClick={() =>
-              update({
-                enabled: true,
-                mode: "variance",
-                variance: 0.95,
-                n_components: null,
-              })
-            }
+            onClick={handleEnable}
             className={`px-5 py-2 rounded-lg border transition ${
               pca.enabled
                 ? "bg-violet-600 text-white border-violet-600"
@@ -151,8 +193,8 @@ function PCAPanel({ value, onChange, featureCount }) {
 
             <select
               value={pca.mode}
-              onChange={(e) =>
-                handleModeChange(e.target.value)
+              onChange={(event) =>
+                handleModeChange(event.target.value)
               }
               className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
             >
@@ -177,29 +219,33 @@ function PCAPanel({ value, onChange, featureCount }) {
 
               <div className="grid grid-cols-3 gap-3">
 
-                {[0.95, 0.90, 0.85].map((variance) => (
-                  <button
-                    key={variance}
-                    type="button"
-                    onClick={() =>
-                      update({ variance })
-                    }
-                    className={`px-4 py-3 rounded-lg border text-sm font-medium transition ${
-                      pca.variance === variance
-                        ? "bg-violet-600 text-white border-violet-600"
-                        : "bg-white text-slate-700 border-slate-300 hover:bg-violet-50"
-                    }`}
-                  >
-                    {variance * 100}% variance
-                  </button>
-                ))}
+                {[0.95, 0.90, 0.85].map(
+                  (variance) => (
+                    <button
+                      key={variance}
+                      type="button"
+                      onClick={() =>
+                        handleVarianceChange(
+                          variance
+                        )
+                      }
+                      className={`px-4 py-3 rounded-lg border text-sm font-medium transition ${
+                        pca.variance === variance
+                          ? "bg-violet-600 text-white border-violet-600"
+                          : "bg-white text-slate-700 border-slate-300 hover:bg-violet-50"
+                      }`}
+                    >
+                      {variance * 100}% variance
+                    </button>
+                  )
+                )}
 
               </div>
 
               <p className="text-xs text-slate-500 mt-2">
-                PCA will automatically determine the number of
-                components required to retain the selected amount
-                of variance.
+                PCA will automatically determine the number
+                of components required to retain the selected
+                amount of variance.
               </p>
 
             </div>
@@ -237,14 +283,15 @@ function PCAPanel({ value, onChange, featureCount }) {
               {componentError && (
                 <p className="text-xs text-red-600 mt-2">
                   PCA components must be between 1 and{" "}
-                  {featureCount || "the available feature count"}.
+                  {featureCount ||
+                    "the available feature count"}.
                 </p>
               )}
 
             </div>
           )}
 
-          {/* Method explanation */}
+          {/* Research explanation */}
           <div className="rounded-lg border border-violet-100 bg-violet-50 p-4">
 
             <p className="text-sm font-medium text-violet-900">
@@ -252,11 +299,12 @@ function PCAPanel({ value, onChange, featureCount }) {
             </p>
 
             <p className="text-sm text-violet-800 mt-1">
-              The experiment will record the original feature count,
-              number of PCA components, and variance retained.
-              This allows PCA and no-PCA configurations to be
-              compared experimentally rather than assuming PCA
-              always improves performance.
+              The experiment records the original feature
+              count, PCA component count, and variance
+              retained. This allows PCA and no-PCA
+              configurations to be compared experimentally
+              rather than assuming PCA always improves
+              performance.
             </p>
 
           </div>
